@@ -109,9 +109,13 @@ jobs:
               "    }\n"
               "    signal_waiter.join();\n"
               "    executor.remove_node(nh);\n"
-              "    const auto remaining_callback_groups = executor.get_all_callback_groups();\n"
+              "    size_t remaining_callback_group_count = 0;\n"
+              "    {\n"
+              "      const auto remaining_callback_groups = executor.get_all_callback_groups();\n"
+              "      remaining_callback_group_count = remaining_callback_groups.size();\n"
+              "    }\n"
               "    RCLCPP_INFO(nh->get_logger(), \"shutdown probe after executor detach flush: remaining_callback_groups=%zu context_valid=%d\", "
-              "      remaining_callback_groups.size(), nh->get_node_base_interface()->get_context()->is_valid());\n"
+              "      remaining_callback_group_count, nh->get_node_base_interface()->get_context()->is_valid());\n"
               "    RCLCPP_INFO(nh->get_logger(), \"shutdown probe after outer executor detach: context_valid=%d\", "
               "nh->get_node_base_interface()->get_context()->is_valid());",
               "executor shutdown replacement",
