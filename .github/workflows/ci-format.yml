@@ -25,3 +25,6 @@ jobs:
         apt-get update && apt-get install -y pre-commit
     - name: Run pre-commit
       run: . /opt/ros/jazzy/setup.sh && pre-commit run --all-files
+    - name: Show formatting diff on failure
+      if: always()
+      run: git diff -- staubli_bringup/launch/launch_robot_control.launch.py
