@@ -19,7 +19,6 @@ from launch.actions import (
     DeclareLaunchArgument,
     EmitEvent,
     IncludeLaunchDescription,
-    LogError,
     RegisterEventHandler,
 )
 from launch.event_handlers import OnProcessExit
@@ -120,9 +119,9 @@ def generate_launch_description():
             return [launch_moveit]
 
         return [
-            LogError(
+            LogInfo(
                 msg=(
-                    "Robot readiness check failed "
+                    "ERROR: Robot readiness check failed "
                     f"(exit code: {event.returncode}); MoveIt will not be started."
                 )
             ),
