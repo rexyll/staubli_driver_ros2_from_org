@@ -118,7 +118,9 @@ def generate_launch_description():
         ]
     )
     robot_description = {
-        "robot_description": ParameterValue(value=robot_description_content, value_type=str)
+        "robot_description": ParameterValue(
+            value=robot_description_content, value_type=str
+        )
     }
 
     # Robot state publisher
@@ -170,7 +172,11 @@ def generate_launch_description():
     load_joint_state_broadcaster = Node(
         package="controller_manager",
         executable="spawner",
-        arguments=["joint_state_broadcaster", "--controller-manager", "/controller_manager"],
+        arguments=[
+            "joint_state_broadcaster",
+            "--controller-manager",
+            "/controller_manager",
+        ],
     )
     joint_state_broadcaster_exit_handler = RegisterEventHandler(
         OnProcessExit(
