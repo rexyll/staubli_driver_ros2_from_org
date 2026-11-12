@@ -118,9 +118,7 @@ def generate_launch_description():
         ]
     )
     robot_description = {
-        "robot_description": ParameterValue(
-            value=robot_description_content, value_type=str
-        )
+        "robot_description": ParameterValue(value=robot_description_content, value_type=str)
     }
 
     # Robot state publisher
@@ -223,9 +221,7 @@ def generate_launch_description():
 
         def on_activation_exit(event, context):
             if event.returncode == 0:
-                return [
-                    LogInfo(msg=f"Controller '{controller_name}' activated successfully.")
-                ]
+                return [LogInfo(msg=f"Controller '{controller_name}' activated successfully.")]
 
             return [
                 LogInfo(
