@@ -251,6 +251,8 @@ jobs:
           PY
           git -C /tmp/moveit_ws/src/moveit2 diff --check
           git -C /tmp/moveit_ws/src/moveit2 diff -- moveit_ros/move_group/src/move_group.cpp
+          git -C /tmp/moveit_ws/src/moveit2 diff -- moveit_ros/planning/trajectory_execution_manager/src/trajectory_execution_manager.cpp
+          git -C /tmp/moveit_ws/src/moveit2 diff -- moveit_ros/planning/trajectory_execution_manager/include/moveit/trajectory_execution_manager/trajectory_execution_manager.hpp
 
       - name: Install MoveIt source dependencies
         shell: bash
@@ -265,7 +267,7 @@ jobs:
           set -eo pipefail
           source /opt/ros/jazzy/setup.bash
           cd /tmp/moveit_ws
-          colcon build --packages-up-to moveit_ros_move_group --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+          colcon build --packages-up-to moveit_ros_move_group --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_FLAGS_RELWITHDEBINFO='-O1 -g -fno-omit-frame-pointer' -DBUILD_TESTING=OFF
 
       - name: Fetch and build Stäubli mock workspace against patched MoveIt
         shell: bash
