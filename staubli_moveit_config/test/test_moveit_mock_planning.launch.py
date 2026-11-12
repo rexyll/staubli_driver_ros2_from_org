@@ -86,9 +86,7 @@ class TestMockMoveItPlanning(unittest.TestCase):
             future = controller_client.call_async(ListControllers.Request())
             rclpy.spin_until_future_complete(self.node, future, timeout_sec=5.0)
             if future.done() and future.result() is not None:
-                states = {
-                    item.name: item.state for item in future.result().controller
-                }
+                states = {item.name: item.state for item in future.result().controller}
                 controllers_active = (
                     states.get("joint_state_broadcaster") == "active"
                     and states.get("joint_trajectory_controller") == "active"
