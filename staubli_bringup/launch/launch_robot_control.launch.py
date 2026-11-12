@@ -218,9 +218,7 @@ def generate_launch_description():
         def on_activation_exit(event, context):
             if event.returncode == 0:
                 return [
-                    LogInfo(
-                        msg=f"Controller '{controller_name}' activated successfully."
-                    )
+                    LogInfo(msg=f"Controller '{controller_name}' activated successfully.")
                 ]
 
             return [
