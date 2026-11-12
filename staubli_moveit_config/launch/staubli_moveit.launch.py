@@ -75,6 +75,14 @@ def generate_launch_description():
 
     declared_arguments.append(
         DeclareLaunchArgument(
+            "move_group_prefix",
+            default_value="",
+            description="Optional executable prefix for move_group diagnostics.",
+        )
+    )
+
+    declared_arguments.append(
+        DeclareLaunchArgument(
             "launch_servo",
             default_value="false",
             description="Whether to launch the Moveit servo node",
@@ -101,6 +109,7 @@ def generate_launch_description():
     launch_rviz = LaunchConfiguration("launch_rviz")
     warehouse_sqlite_path = LaunchConfiguration("warehouse_sqlite_path")
     launch_servo = LaunchConfiguration("launch_servo")
+    move_group_prefix = LaunchConfiguration("move_group_prefix")
     use_sim_time = LaunchConfiguration("use_sim_time")
     publish_robot_description_semantic = LaunchConfiguration("publish_robot_description_semantic")
 
@@ -131,6 +140,7 @@ def generate_launch_description():
         package="moveit_ros_move_group",
         executable="move_group",
         output="screen",
+        prefix=move_group_prefix,
         parameters=[
             moveit_config.to_dict(),
             warehouse_ros_config,
