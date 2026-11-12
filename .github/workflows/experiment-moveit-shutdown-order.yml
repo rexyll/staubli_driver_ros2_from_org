@@ -160,6 +160,20 @@ jobs:
               1,
           )
           tem_header_path.write_text(tem_header_source)
+          group_pattern = (
+              r"  auto callback_group = node_->create_callback_group\(rclcpp::CallbackGroupType::MutuallyExclusive\);\n"
+              r"  auto options = rclcpp::SubscriptionOptions\(\);\n"
+              r"  options.callback_group = callback_group;"
+          )
+          group_replacement = (
+              "  event_callback_group_ = node_->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);\n"
+              "  auto options = rclcpp::SubscriptionOptions();\n"
+              "  options.callback_group = event_callback_group_;"
+          )
+          tem_source, group_count = re.subn(group_pattern, group_replacement, tem_source, count=1)
+          if group_count != 1:
+              raise SystemExit(f"Expected exactly one event callback-group anchor, found {group_count}; refusing to patch.")
+
           tem_pattern = (
               r"TrajectoryExecutionManager::~TrajectoryExecutionManager\(\)\n"
               r"\{\n"
