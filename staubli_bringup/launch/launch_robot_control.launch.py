@@ -179,6 +179,7 @@ def generate_launch_description():
         activation_condition = IfCondition(
             EqualsSubstitution(LaunchConfiguration("start_controller"), controller_name)
         )
+
         def on_controller_spawner_exit(event, context):
             if event.returncode != 0:
                 return [
