@@ -12,11 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import time
 import unittest
 
 import launch
 import launch_testing.actions
 from ament_index_python.packages import get_package_share_directory
+from controller_manager_msgs.srv import ListControllers
 from launch.actions import IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from moveit_msgs.action import MoveGroup
@@ -71,6 +73,31 @@ class TestMockMoveItPlanning(unittest.TestCase):
         rclpy.shutdown()
 
     def test_move_group_plans_joint_goal_without_execution(self):
+        controller_client = self.node.create_client(
+            ListControllers, "/controller_manager/list_controllers"
+        )
+        self.assertTrue(
+            controller_client.wait_for_service(timeout_sec=30.0),
+            "controller_manager list_controllers service did not become available",
+        )
+        deadline = time.monotonic() + 30.0
+        controllers_active = False
+        while time.monotonic() < deadline:
+            future = controller_client.call_async(ListControllers.Request())
+            rclpy.spin_until_future_complete(self.node, future, timeout_sec=5.0)
+            if future.done() and future.result() is not None:
+                states = {
+                    item.name: item.state for item in future.result().controller
+                }
+                controllers_active = (
+                    states.get("joint_state_broadcaster") == "active"
+                    and states.get("joint_trajectory_controller") == "active"
+                )
+                if controllers_active:
+                    break
+            time.sleep(0.2)
+        self.assertTrue(controllers_active, "mock controllers did not become active")
+
         client = ActionClient(self.node, MoveGroup, "/move_action")
         self.assertTrue(
             client.wait_for_server(timeout_sec=120.0),
@@ -119,3 +146,6 @@ class TestMockMoveItPlanning(unittest.TestCase):
             set(result.planned_trajectory.joint_trajectory.joint_names),
             {f"joint_{index}" for index in range(1, 7)},
         )
+        # Let controller activation finish before launch_testing starts
+        # SIGINT teardown of the included bringup launch.
+        time.sleep(1.0)
