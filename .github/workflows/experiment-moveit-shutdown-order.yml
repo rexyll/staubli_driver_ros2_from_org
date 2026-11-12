@@ -41,80 +41,83 @@ jobs:
           path = Path("/tmp/moveit_ws/src/moveit2/moveit_ros/move_group/src/move_group.cpp")
           source = path.read_text()
 
-          def replace_once(pattern, replacement, label, flags=0):
-              nonlocal_source = None
+          def replace_once(pattern, replacement, label):
               global source
-              updated, count = re.subn(pattern, replacement, source, count=1, flags=flags)
+              updated, count = re.subn(pattern, replacement, source, count=1, flags=re.MULTILINE)
               if count != 1:
                   raise SystemExit(f"Expected exactly one {label} match, found {count}; refusing to patch.")
               source = updated
 
-          # Insert required POSIX signal/thread headers after a stable include line.
-          replace_once(r"(?m)^#include <set>\\n",
-              "#include <set>\\n#include <atomic>\\n#include <pthread.h>\\n#include <signal.h>\\n#include <thread>\\n",
-              "include insertion")
+          replace_once(
+              r"^#include <set>\n",
+              "#include <set>\n#include <atomic>\n#include <pthread.h>\n#include <signal.h>\n#include <thread>\n",
+              "include insertion",
+          )
 
-          # Disable rclcpp's default signal handler and block signals before any ROS threads are created.
-          replace_once(r"(?m)^  rclcpp::init\\(argc, argv\\);$",
-              "  sigset_t shutdown_signals;\\n"
-              "  sigemptyset(&shutdown_signals);\\n"
-              "  sigaddset(&shutdown_signals, SIGINT);\\n"
-              "  sigaddset(&shutdown_signals, SIGTERM);\\n"
-              "  sigaddset(&shutdown_signals, SIGUSR1);\\n"
-              "  const int signal_mask_result = pthread_sigmask(SIG_BLOCK, &shutdown_signals, nullptr);\\n"
-              "  if (signal_mask_result != 0)\\n"
-              "  {\\n"
-              "    return signal_mask_result;\\n"
-              "  }\\n\\n"
-              "  rclcpp::InitOptions init_options;\\n"
-              "  init_options.shutdown_on_signal = false;\\n"
-              "  rclcpp::init(argc, argv, init_options, rclcpp::SignalHandlerOptions::None);\\n"
+          replace_once(
+              r"^  rclcpp::init\(argc, argv\);$",
+              "  sigset_t shutdown_signals;\n"
+              "  sigemptyset(&shutdown_signals);\n"
+              "  sigaddset(&shutdown_signals, SIGINT);\n"
+              "  sigaddset(&shutdown_signals, SIGTERM);\n"
+              "  sigaddset(&shutdown_signals, SIGUSR1);\n"
+              "  const int signal_mask_result = pthread_sigmask(SIG_BLOCK, &shutdown_signals, nullptr);\n"
+              "  if (signal_mask_result != 0)\n"
+              "  {\n"
+              "    return signal_mask_result;\n"
+              "  }\n\n"
+              "  rclcpp::InitOptions init_options;\n"
+              "  init_options.shutdown_on_signal = false;\n"
+              "  rclcpp::init(argc, argv, init_options, rclcpp::SignalHandlerOptions::None);\n"
               "  {",
-              "rclcpp init replacement")
+              "rclcpp init replacement",
+          )
 
-          # Start a dedicated sigwait thread only after the executor exists.
-          replace_once(r"(?m)^(    move_group::MoveGroupExe mge\\(moveit_cpp, default_planning_pipeline, debug\\);)$",
-              r"\\1\\n"
-              "    std::atomic<bool> signal_waiter_done{false};\\n"
-              "    std::thread signal_waiter([&executor, &shutdown_signals, &signal_waiter_done]() {\\n"
-              "      int signal_number = 0;\\n"
-              "      const int wait_result = sigwait(&shutdown_signals, &signal_number);\\n"
-              "      if (wait_result != 0 || signal_number != SIGUSR1)\\n"
-              "      {\\n"
-              "        executor.cancel();\\n"
-              "      }\\n"
-              "      signal_waiter_done.store(true);\\n"
+          replace_once(
+              r"^(    move_group::MoveGroupExe mge\(moveit_cpp, default_planning_pipeline, debug\);)$",
+              lambda match: match.group(1) + "\n"
+              "    std::atomic<bool> signal_waiter_done{false};\n"
+              "    std::thread signal_waiter([&executor, &shutdown_signals, &signal_waiter_done]() {\n"
+              "      int signal_number = 0;\n"
+              "      const int wait_result = sigwait(&shutdown_signals, &signal_number);\n"
+              "      if (wait_result != 0 || signal_number != SIGUSR1)\n"
+              "      {\n"
+              "        executor.cancel();\n"
+              "      }\n"
+              "      signal_waiter_done.store(true);\n"
               "    });",
-              "MoveGroupExe insertion")
+              "MoveGroupExe insertion",
+          )
 
-          # Once spin returns, release the waiter if no external shutdown signal arrived, then join it.
-          replace_once(r"(?m)^    executor\\.spin\\(\\);\\n\\s*rclcpp::shutdown\\(\\);$",
-              "    executor.spin();\\n"
-              "    if (!signal_waiter_done.load())\\n"
-              "    {\\n"
-              "      pthread_kill(signal_waiter.native_handle(), SIGUSR1);\\n"
-              "    }\\n"
+          replace_once(
+              r"^    executor\.spin\(\);\n\s*rclcpp::shutdown\(\);$",
+              "    executor.spin();\n"
+              "    if (!signal_waiter_done.load())\n"
+              "    {\n"
+              "      pthread_kill(signal_waiter.native_handle(), SIGUSR1);\n"
+              "    }\n"
               "    signal_waiter.join();",
-              "executor shutdown replacement")
+              "executor shutdown replacement",
+          )
 
-          # Destroy all MoveIt/node/executor locals before shutting down the ROS context.
-          replace_once(r"(?m)^  return 0;\\n}$",
-              "  }\\n  rclcpp::shutdown();\\n  return 0;\\n}",
-              "main scope close")
+          replace_once(
+              r"^  return 0;\n}$",
+              "  }\n  rclcpp::shutdown();\n  return 0;\n}",
+              "main scope close",
+          )
 
           if source.count("rclcpp::shutdown();") != 1:
               raise SystemExit("Expected exactly one deferred rclcpp::shutdown(); refusing to continue.")
           if source.count("rclcpp::SignalHandlerOptions::None") != 1:
               raise SystemExit("Signal handler suppression was not applied exactly once.")
-          if "signal_waiter.join();" not in source or "executor.cancel();" not in source:
-              raise SystemExit("Signal waiter lifecycle validation failed.")
           if source.count("pthread_sigmask(SIG_BLOCK") != 1:
               raise SystemExit("Signal mask validation failed.")
+          if "signal_waiter.join();" not in source or "executor.cancel();" not in source:
+              raise SystemExit("Signal waiter lifecycle validation failed.")
 
           path.write_text(source)
           print("Applied structured MoveIt Jazzy signal-wait patch.")
-          print("Validated: unique include/init/executor/spin/main anchors; deferred shutdown; joined waiter.")
-          PY
+          print("Validated unique include/init/executor/spin/main anchors and deferred context shutdown.")
           PY
           git -C /tmp/moveit_ws/src/moveit2 diff --check
           git -C /tmp/moveit_ws/src/moveit2 diff -- moveit_ros/move_group/src/move_group.cpp
