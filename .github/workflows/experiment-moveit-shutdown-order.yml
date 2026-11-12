@@ -146,6 +146,20 @@ jobs:
               "trajectory_execution_manager.cpp"
           )
           tem_source = tem_path.read_text()
+          tem_header_path = Path(
+              "/tmp/moveit_ws/src/moveit2/moveit_ros/planning/trajectory_execution_manager/include/"
+              "moveit/trajectory_execution_manager/trajectory_execution_manager.hpp"
+          )
+          tem_header_source = tem_header_path.read_text()
+          callback_member_anchor = "  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr event_topic_subscriber_;\n"
+          if tem_header_source.count(callback_member_anchor) != 1:
+              raise SystemExit("Expected one TEM event subscription member anchor; refusing to patch.")
+          tem_header_source = tem_header_source.replace(
+              callback_member_anchor,
+              callback_member_anchor + "  rclcpp::CallbackGroup::SharedPtr event_callback_group_;\n",
+              1,
+          )
+          tem_header_path.write_text(tem_header_source)
           tem_pattern = (
               r"TrajectoryExecutionManager::~TrajectoryExecutionManager\(\)\n"
               r"\{\n"
