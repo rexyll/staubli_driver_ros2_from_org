@@ -15,8 +15,9 @@
 # Author: Thibault Poignonec <thibault.poignonec@gmail.com>
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, RegisterEventHandler
+from launch.actions import DeclareLaunchArgument, EmitEvent, IncludeLaunchDescription, LogError, RegisterEventHandler
 from launch.event_handlers import OnProcessExit
+from launch.events import Shutdown
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
@@ -99,12 +100,36 @@ def generate_launch_description():
         package="staubli_bringup",
         executable="wait_for_robot_ready.py",
         name="wait_for_robot_ready",
+        parameters=[
+            {
+                "timeout_sec": 30.0,
+                "expected_joint_names": [f"joint_{index}" for index in range(1, 7)],
+            }
+        ],
         output="both",
     )
 
-    # Launch MoveIt when robot description becomes available
+    def on_readiness_check_exit(event, context):
+        if event.returncode == 0:
+            return [launch_moveit]
+
+        return [
+            LogError(
+                msg=(
+                    "Robot readiness check failed "
+                    f"(exit code: {event.returncode}); MoveIt will not be started."
+                )
+            ),
+            EmitEvent(
+                event=Shutdown(
+                    reason=f"Robot readiness check failed with exit code {event.returncode}"
+                )
+            ),
+        ]
+
+    # Launch MoveIt only after a successful readiness check.
     launch_moveit_when_ready = RegisterEventHandler(
-        OnProcessExit(target_action=wait_for_robot_ready, on_exit=[launch_moveit])
+        OnProcessExit(target_action=wait_for_robot_ready, on_exit=on_readiness_check_exit)
     )
 
     return LaunchDescription(declared_arguments + [wait_for_robot_ready, launch_moveit_when_ready])
