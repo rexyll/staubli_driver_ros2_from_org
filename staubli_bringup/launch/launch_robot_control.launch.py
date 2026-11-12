@@ -18,7 +18,6 @@ from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
     ExecuteProcess,
-    LogError,
     LogInfo,
     RegisterEventHandler,
     EmitEvent,
@@ -183,9 +182,9 @@ def generate_launch_description():
         def on_controller_spawner_exit(event, context):
             if event.returncode != 0:
                 return [
-                    LogError(
+                    LogInfo(
                         msg=(
-                            f"Failed to spawn controller '{controller_name}' "
+                            f"ERROR: Failed to spawn controller '{controller_name}' "
                             f"(exit code: {event.returncode}); shutting down bringup."
                         )
                     ),
