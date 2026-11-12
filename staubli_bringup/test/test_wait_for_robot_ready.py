@@ -13,6 +13,8 @@
 # limitations under the License.
 
 import importlib.util
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -80,3 +82,23 @@ def test_readiness_accepts_transient_description_and_volatile_joint_states():
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
+
+
+def test_readiness_timeout_returns_nonzero_exit_code():
+    module_path = Path(__file__).resolve().parents[1] / "scripts" / "wait_for_robot_ready.py"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(module_path),
+            "--ros-args",
+            "-p",
+            "timeout_sec:=0.2",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=5.0,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "Timed out after 0.2s" in result.stdout + result.stderr
