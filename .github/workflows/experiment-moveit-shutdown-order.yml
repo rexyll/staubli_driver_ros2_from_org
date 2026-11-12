@@ -48,18 +48,21 @@ jobs:
           callback = base / "callback_group.cpp"
           source = callback.read_text()
           source = source.replace("#include <algorithm>\n", "#include <algorithm>\n#include <cstdio>\n", 1)
+          callback.write_text(source)
           replace_once(callback, "CallbackGroup::~CallbackGroup()\n{\n  trigger_notify_guard_condition();\n}\n", "CallbackGroup::~CallbackGroup()\n{\n  std::fprintf(stderr, \"[RCLCPP_SHUTDOWN_PROBE] CallbackGroup dtor this=%p notify_gc=%p context_expired=%d\\n\", this, notify_guard_condition_.get(), context_.expired());\n  trigger_notify_guard_condition();\n  std::fprintf(stderr, \"[RCLCPP_SHUTDOWN_PROBE] CallbackGroup dtor complete this=%p\\n\", this);\n}\n", "CallbackGroup destructor")
           replace_once(callback, "  if (notify_guard_condition_) {\n    notify_guard_condition_->trigger();\n  }\n", "  if (notify_guard_condition_) {\n    std::fprintf(stderr, \"[RCLCPP_SHUTDOWN_PROBE] CallbackGroup trigger begin this=%p gc=%p\\n\", this, notify_guard_condition_.get());\n    notify_guard_condition_->trigger();\n    std::fprintf(stderr, \"[RCLCPP_SHUTDOWN_PROBE] CallbackGroup trigger end this=%p\\n\", this);\n  } else {\n    std::fprintf(stderr, \"[RCLCPP_SHUTDOWN_PROBE] CallbackGroup has no notify guard condition this=%p\\n\", this);\n  }\n", "CallbackGroup guard trigger")
 
           guard = base / "guard_condition.cpp"
           source = guard.read_text()
           source = source.replace("#include <functional>\n", "#include <functional>\n#include <cstdio>\n", 1)
+          guard.write_text(source)
           replace_once(guard, "void\nGuardCondition::trigger()\n{\n  rcl_ret_t ret = rcl_trigger_guard_condition(&rcl_guard_condition_);\n", "void\nGuardCondition::trigger()\n{\n  std::fprintf(stderr, \"[RCLCPP_SHUTDOWN_PROBE] GuardCondition trigger begin this=%p rcl_gc=%p\\n\", this, &rcl_guard_condition_);\n  rcl_ret_t ret = rcl_trigger_guard_condition(&rcl_guard_condition_);\n  std::fprintf(stderr, \"[RCLCPP_SHUTDOWN_PROBE] GuardCondition rcl trigger returned this=%p ret=%d\\n\", this, static_cast<int>(ret));\n", "GuardCondition trigger entry")
           replace_once(guard, "    if (on_trigger_callback_) {\n      on_trigger_callback_(1);\n    } else {\n      unread_count_++;\n    }\n", "    if (on_trigger_callback_) {\n      std::fprintf(stderr, \"[RCLCPP_SHUTDOWN_PROBE] GuardCondition callback begin this=%p\\n\", this);\n      on_trigger_callback_(1);\n      std::fprintf(stderr, \"[RCLCPP_SHUTDOWN_PROBE] GuardCondition callback end this=%p\\n\", this);\n    } else {\n      unread_count_++;\n      std::fprintf(stderr, \"[RCLCPP_SHUTDOWN_PROBE] GuardCondition no callback this=%p unread=%zu\\n\", this, unread_count_);\n    }\n", "GuardCondition callback")
 
           waitable = base / "executors" / "executor_notify_waitable.cpp"
           source = waitable.read_text()
           source = source.replace("#include <iostream>\n", "#include <iostream>\n#include <cstdio>\n", 1)
+          waitable.write_text(source)
           replace_once(waitable, "  if (notify_guard_conditions_.count(weak_guard_condition) != 0) {\n    notify_guard_conditions_.erase(weak_guard_condition);\n    auto guard_condition = weak_guard_condition.lock();\n", "  if (notify_guard_conditions_.count(weak_guard_condition) != 0) {\n    auto guard_condition = weak_guard_condition.lock();\n    std::fprintf(stderr, \"[RCLCPP_SHUTDOWN_PROBE] NotifyWaitable remove gc=%p on_ready=%d\\n\", guard_condition.get(), static_cast<int>(static_cast<bool>(on_ready_callback_)));\n    notify_guard_conditions_.erase(weak_guard_condition);\n", "notify waitable remove")
           replace_once(waitable, "      guard_condition->set_on_trigger_callback(nullptr);\n", "      {\n        std::fprintf(stderr, \"[RCLCPP_SHUTDOWN_PROBE] NotifyWaitable clearing callback gc=%p\\n\", guard_condition.get());\n        guard_condition->set_on_trigger_callback(nullptr);\n      }\n", "notify callback clear")
 
