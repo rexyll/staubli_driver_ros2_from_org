@@ -1,4 +1,5 @@
 # This is a format job. Pre-commit has a first-party GitHub action, so we use
+# It runs on main pushes as well as pull requests and manual dispatches.
 # that: https://github.com/pre-commit/action
 
 name: Format
