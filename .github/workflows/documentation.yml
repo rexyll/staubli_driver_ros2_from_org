@@ -39,6 +39,7 @@ jobs:
 
   # Deployment job
   deploy_documentation:
+    if: github.repository == 'ICube-Robotics/staubli_driver_ros2'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
