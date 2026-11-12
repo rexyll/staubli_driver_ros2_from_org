@@ -42,9 +42,7 @@ def generate_test_description():
         }.items(),
     )
     return (
-        launch.LaunchDescription(
-            [bringup_launch, launch_testing.actions.ReadyToTest()]
-        ),
+        launch.LaunchDescription([bringup_launch, launch_testing.actions.ReadyToTest()]),
         {"bringup_launch": bringup_launch},
     )
 
@@ -61,9 +59,7 @@ class TestMockBringup(unittest.TestCase):
         rclpy.shutdown()
 
     def test_controller_lifecycle_and_joint_states(self):
-        client = self.node.create_client(
-            ListControllers, "/controller_manager/list_controllers"
-        )
+        client = self.node.create_client(ListControllers, "/controller_manager/list_controllers")
         deadline = time.monotonic() + 90.0
         response = None
         while time.monotonic() < deadline:
@@ -80,9 +76,7 @@ class TestMockBringup(unittest.TestCase):
                         break
             time.sleep(0.2)
 
-        self.assertIsNotNone(
-            response, "controller_manager list_controllers did not respond"
-        )
+        self.assertIsNotNone(response, "controller_manager list_controllers did not respond")
         states = {item.name: item.state for item in response.controller}
         self.assertEqual(states.get("joint_state_broadcaster"), "active", states)
         self.assertEqual(states.get("joint_trajectory_controller"), "active", states)
