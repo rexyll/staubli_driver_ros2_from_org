@@ -192,14 +192,25 @@ jobs:
               "    private_executor_->cancel();\n"
               "  if (private_executor_thread_.joinable())\n"
               "    private_executor_thread_.join();\n"
-              "\n"
-              "  // Release the plugin's action clients and node before unloading their controller manager library.\n"
+              "  RCLCPP_INFO(logger_, \"shutdown probe TEM after stop/join: main_context_valid=%d controller_context_valid=%d\", "
+              "node_->get_node_base_interface()->get_context()->is_valid(), "
+              "(controller_mgr_node_ && controller_mgr_node_->get_node_base_interface()->get_context()->is_valid()));\n"
+              "  event_topic_subscriber_.reset();\n"
+              "  RCLCPP_INFO(logger_, \"shutdown probe TEM after event subscription reset: main_context_valid=%d\", "
+              "node_->get_node_base_interface()->get_context()->is_valid());\n"
               "  callback_handler_.reset();\n"
+              "  event_callback_group_.reset();\n"
+              "  RCLCPP_INFO(logger_, \"shutdown probe TEM after callback group reset: main_context_valid=%d\", "
+              "node_->get_node_base_interface()->get_context()->is_valid());\n"
               "  if (private_executor_ && controller_mgr_node_)\n"
               "    private_executor_->remove_node(controller_mgr_node_);\n"
               "  private_executor_.reset();\n"
               "  controller_manager_.reset();\n"
+              "  RCLCPP_INFO(logger_, \"shutdown probe TEM before controller node reset: controller_context_valid=%d\", "
+              "(controller_mgr_node_ && controller_mgr_node_->get_node_base_interface()->get_context()->is_valid()));\n"
               "  controller_mgr_node_.reset();\n"
+              "  RCLCPP_INFO(logger_, \"shutdown probe TEM after controller node reset: main_context_valid=%d\", "
+              "node_->get_node_base_interface()->get_context()->is_valid());\n"
               "}\n"
           )
           tem_updated, tem_count = re.subn(tem_pattern, tem_replacement, tem_source, count=1)
@@ -210,7 +221,9 @@ jobs:
               )
           tem_source = tem_updated
           cleanup_tokens = (
+              "event_topic_subscriber_.reset();",
               "callback_handler_.reset();",
+              "event_callback_group_.reset();",
               "private_executor_->remove_node(controller_mgr_node_);",
               "private_executor_.reset();",
               "controller_manager_.reset();",
@@ -220,7 +233,9 @@ jobs:
               raise SystemExit("Internal controller-manager cleanup validation failed.")
           if not (
               tem_source.index("private_executor_thread_.join();")
+              < tem_source.index("event_topic_subscriber_.reset();")
               < tem_source.index("callback_handler_.reset();")
+              < tem_source.index("event_callback_group_.reset();")
               < tem_source.index("private_executor_->remove_node(controller_mgr_node_);")
               < tem_source.index("private_executor_.reset();")
               < tem_source.index("controller_manager_.reset();")
