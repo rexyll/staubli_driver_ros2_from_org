@@ -28,7 +28,7 @@ jobs:
           source /opt/ros/jazzy/setup.bash
           rosdep update --rosdistro jazzy
 
-      - name: Fetch MoveIt Jazzy source and apply isolated teardown-order experiment
+      - name: Fetch MoveIt Jazzy source and apply controlled signal-wait and teardown-order experiment
         shell: bash
         run: |
           set -eo pipefail
@@ -39,34 +39,88 @@ jobs:
 
           path = Path("/tmp/moveit_ws/src/moveit2/moveit_ros/move_group/src/move_group.cpp")
           source = path.read_text()
-          before_init = "  rclcpp::init(argc, argv);\n\n  rclcpp::NodeOptions opt;"
-          after_init = (
+          include_anchor = "#include <memory>\n#include <set>\n"
+          include_replacement = (
+              "#include <atomic>\n"
+              "#include <memory>\n"
+              "#include <pthread.h>\n"
+              "#include <set>\n"
+              "#include <signal.h>\n"
+              "#include <thread>\n"
+          )
+          before_init = (
               "  rclcpp::init(argc, argv);\n\n"
               "  // Experiment: destroy all MoveIt and executor locals before context shutdown.\n"
               "  {\n"
               "  rclcpp::NodeOptions opt;"
           )
-          before_shutdown = (
-              "    rclcpp::shutdown();\n"
-              "  }\n"
-              "  else\n"
-              "    RCLCPP_ERROR(nh->get_logger(), \"Planning scene not configured\");\n\n"
-              "  return 0;\n"
-              "}"
+          after_init = (
+              "  sigset_t shutdown_signals;\n"
+              "  sigemptyset(&shutdown_signals);\n"
+              "  sigaddset(&shutdown_signals, SIGINT);\n"
+              "  sigaddset(&shutdown_signals, SIGTERM);\n"
+              "  sigaddset(&shutdown_signals, SIGUSR1);\n"
+              "  const int signal_mask_result = pthread_sigmask(SIG_BLOCK, &shutdown_signals, nullptr);\n"
+              "  if (signal_mask_result != 0)\n"
+              "  {\n"
+              "    return signal_mask_result;\n"
+              "  }\n\n"
+              "  rclcpp::InitOptions init_options;\n"
+              "  init_options.shutdown_on_signal = false;\n"
+              "  rclcpp::init(argc, argv, init_options, rclcpp::SignalHandlerOptions::None);\n\n"
+              "  // Experiment: defer Context shutdown until the executor and MoveIt locals are destroyed.\n"
+              "  {\n"
+              "  rclcpp::NodeOptions opt;"
           )
-          after_shutdown = (
+          executor_anchor = (
+              "    rclcpp::executors::MultiThreadedExecutor executor;\n\n"
+              "    move_group::MoveGroupExe mge(moveit_cpp, default_planning_pipeline, debug);"
+          )
+          executor_replacement = (
+              "    rclcpp::executors::MultiThreadedExecutor executor;\n"
+              "    std::atomic<bool> signal_waiter_done{false};\n"
+              "    std::thread signal_waiter([&executor, &shutdown_signals, &signal_waiter_done]() {\n"
+              "      int signal_number = 0;\n"
+              "      const int wait_result = sigwait(&shutdown_signals, &signal_number);\n"
+              "      if (wait_result != 0 || signal_number != SIGUSR1)\n"
+              "      {\n"
+              "        executor.cancel();\n"
+              "      }\n"
+              "      signal_waiter_done.store(true);\n"
+              "    });\n\n"
+              "    move_group::MoveGroupExe mge(moveit_cpp, default_planning_pipeline, debug);"
+          )
+          before_shutdown = (
+              "    executor.spin();\n\n"
               "  }\n"
               "  else\n"
               "    RCLCPP_ERROR(nh->get_logger(), \"Planning scene not configured\");\n"
               "  }\n\n"
-              "  rclcpp::shutdown();\n"
-              "  return 0;\n"
-              "}"
+              "  rclcpp::shutdown();"
           )
-          if source.count(before_init) != 1 or source.count(before_shutdown) != 1:
+          after_shutdown = (
+              "    executor.spin();\n"
+              "    if (!signal_waiter_done.load())\n"
+              "    {\n"
+              "      pthread_kill(signal_waiter.native_handle(), SIGUSR1);\n"
+              "    }\n"
+              "    signal_waiter.join();\n"
+              "  }\n"
+              "  else\n"
+              "    RCLCPP_ERROR(nh->get_logger(), \"Planning scene not configured\");\n"
+              "  }\n\n"
+              "  rclcpp::shutdown();"
+          )
+          anchors = [
+              (include_anchor, include_replacement),
+              (before_init, after_init),
+              (executor_anchor, executor_replacement),
+              (before_shutdown, after_shutdown),
+          ]
+          if any(source.count(before) != 1 for before, _ in anchors):
               raise SystemExit("MoveIt Jazzy source did not match the reviewed main()/shutdown layout; refusing to patch.")
-          source = source.replace(before_init, after_init, 1)
-          source = source.replace(before_shutdown, after_shutdown, 1)
+          for before, after in anchors:
+              source = source.replace(before, after, 1)
           path.write_text(source)
           print("Applied isolated scope-order patch:")
           print("\n".join(source.splitlines()[215:345]))
