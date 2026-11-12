@@ -19,6 +19,7 @@ from launch.actions import (
     DeclareLaunchArgument,
     EmitEvent,
     IncludeLaunchDescription,
+    LogInfo,
     RegisterEventHandler,
 )
 from launch.event_handlers import OnProcessExit
