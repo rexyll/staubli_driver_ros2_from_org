@@ -74,7 +74,7 @@ target_include_directories(${PROJECT_NAME} PUBLIC
 )
 ament_target_dependencies(${PROJECT_NAME} ${DEPENDENCIES})
 
-target_link_libraries(${PROJECT_NAME} PRIVATE Boost::system)
+target_link_libraries(${PROJECT_NAME} Boost::system)
 
 # Hardware interface library
 add_library(${PROJECT_NAME}_hardware_interface SHARED
@@ -181,6 +181,7 @@ endif()
 
 ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
 ament_export_dependencies(
+  Boost
   rclcpp
   std_msgs
   sensor_msgs
