@@ -17,10 +17,10 @@
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
+    EmitEvent,
     ExecuteProcess,
     LogInfo,
     RegisterEventHandler,
-    EmitEvent,
 )
 from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessExit
@@ -33,8 +33,8 @@ from launch.substitutions import (
     PathJoinSubstitution,
 )
 from launch_ros.actions import Node
-from launch_ros.substitutions import FindPackageShare
 from launch_ros.parameter_descriptions import ParameterValue
+from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
@@ -98,7 +98,6 @@ def generate_launch_description():
     use_mock_hardware = LaunchConfiguration("use_mock_hardware")
 
     # Robot description
-
     description_file = PathJoinSubstitution(
         [FindPackageShare("staubli_robot_description"), "urdf", "staubli.urdf.xacro"]
     )
@@ -123,7 +122,6 @@ def generate_launch_description():
     }
 
     # Robot state publisher
-
     robot_state_publisher_node = Node(
         package="robot_state_publisher",
         executable="robot_state_publisher",
@@ -147,23 +145,52 @@ def generate_launch_description():
         output="both",
     )
 
-    # Always load and activate joint state broadcaster
+    def on_spawner_exit(event, context, controller_name):
+        if event.returncode == 0:
+            return []
+
+        return [
+            LogInfo(
+                msg=(
+                    f"ERROR: Failed to spawn controller '{controller_name}' "
+                    f"(exit code: {event.returncode}); shutting down bringup."
+                )
+            ),
+            EmitEvent(
+                event=Shutdown(
+                    reason=(
+                        f"Controller spawner for '{controller_name}' "
+                        f"failed with exit code {event.returncode}"
+                    )
+                )
+            ),
+        ]
+
+    # Always load and activate joint state broadcaster.
     load_joint_state_broadcaster = Node(
         package="controller_manager",
         executable="spawner",
         arguments=["joint_state_broadcaster", "--controller-manager", "/controller_manager"],
     )
+    joint_state_broadcaster_exit_handler = RegisterEventHandler(
+        OnProcessExit(
+            target_action=load_joint_state_broadcaster,
+            on_exit=lambda event, context: on_spawner_exit(
+                event, context, "joint_state_broadcaster"
+            ),
+        )
+    )
 
-    # Load controllers
-    load_controllers = [load_joint_state_broadcaster]
-
-    # Add your controllers here
-    controllers_to_load = [
-        "joint_trajectory_controller",
+    # Load controllers.
+    load_controllers = [
+        joint_state_broadcaster_exit_handler,
+        load_joint_state_broadcaster,
     ]
 
+    controllers_to_load = ["joint_trajectory_controller"]
+
     def load_controller_cmd(controller_name: str):
-        # Spawn controller, inactive by default
+        # Spawn controller, inactive by default.
         load_node = Node(
             package="controller_manager",
             executable="spawner",
@@ -174,29 +201,52 @@ def generate_launch_description():
                 "--inactive",
             ],
         )
-        # Activate controller if specified at launch
         activation_condition = IfCondition(
             EqualsSubstitution(LaunchConfiguration("start_controller"), controller_name)
+        )
+        activation_process = ExecuteProcess(
+            condition=activation_condition,
+            cmd=[
+                "ros2",
+                "control",
+                "set_controller_state",
+                controller_name,
+                "active",
+            ],
+        )
+
+        def on_activation_exit(event, context):
+            if event.returncode == 0:
+                return [
+                    LogInfo(
+                        msg=f"Controller '{controller_name}' activated successfully."
+                    )
+                ]
+
+            return [
+                LogInfo(
+                    msg=(
+                        f"ERROR: Failed to activate controller '{controller_name}' "
+                        f"(exit code: {event.returncode}); shutting down bringup."
+                    )
+                ),
+                EmitEvent(
+                    event=Shutdown(
+                        reason=(
+                            f"Controller activation for '{controller_name}' "
+                            f"failed with exit code {event.returncode}"
+                        )
+                    )
+                ),
+            ]
+
+        activation_exit_handler = RegisterEventHandler(
+            OnProcessExit(target_action=activation_process, on_exit=on_activation_exit)
         )
 
         def on_controller_spawner_exit(event, context):
             if event.returncode != 0:
-                return [
-                    LogInfo(
-                        msg=(
-                            f"ERROR: Failed to spawn controller '{controller_name}' "
-                            f"(exit code: {event.returncode}); shutting down bringup."
-                        )
-                    ),
-                    EmitEvent(
-                        event=Shutdown(
-                            reason=(
-                                f"Controller spawner for '{controller_name}' "
-                                f"failed with exit code {event.returncode}"
-                            )
-                        )
-                    ),
-                ]
+                return on_spawner_exit(event, context, controller_name)
 
             return [
                 LogInfo(
@@ -207,16 +257,8 @@ def generate_launch_description():
                         "\033[0m",
                     ],
                 ),
-                ExecuteProcess(
-                    condition=activation_condition,
-                    cmd=[
-                        "ros2",
-                        "control",
-                        "set_controller_state",
-                        controller_name,
-                        "active",
-                    ],
-                ),
+                activation_exit_handler,
+                activation_process,
             ]
 
         post_load_action = RegisterEventHandler(
@@ -242,7 +284,7 @@ def generate_launch_description():
         arguments=["-d", rviz_config_file],
         condition=IfCondition(LaunchConfiguration("gui")),
     )
-    # Launch description
+
     nodes = [
         robot_state_publisher_node,
         control_node,
