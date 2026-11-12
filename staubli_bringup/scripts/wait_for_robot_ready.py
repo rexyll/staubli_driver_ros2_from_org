@@ -17,6 +17,7 @@
 # Copyright (c) 2024 FZI Forschungszentrum Informatik
 
 import rclpy
+import sys
 from rclpy.node import Node
 
 from sensor_msgs.msg import JointState
@@ -34,6 +35,11 @@ class WaitForRoboReady(Node):
         # Declare parameters
         self.declare_parameter("description_topic", "robot_description")
         self.declare_parameter("joint_states_topic", "joint_states")
+        self.declare_parameter("timeout_sec", 30.0)
+        self.declare_parameter(
+            "expected_joint_names",
+            [f"joint_{index}" for index in range(1, 7)],
+        )
 
         # Get parameter values
         self.description_topic = (
@@ -42,6 +48,12 @@ class WaitForRoboReady(Node):
         self.joint_states_topic = (
             self.get_parameter("joint_states_topic").get_parameter_value().string_value
         )
+        self.timeout_sec = self.get_parameter("timeout_sec").get_parameter_value().double_value
+        self.expected_joint_names = set(
+            self.get_parameter("expected_joint_names").get_parameter_value().string_array_value
+        )
+        if self.timeout_sec <= 0.0:
+            raise ValueError("timeout_sec must be greater than zero")
 
         qos_profile = QoSProfile(
             depth=1,
@@ -79,6 +91,15 @@ class WaitForRoboReady(Node):
 
     def joint_states_callback(self, msg):
         if not self.joint_states_future.done():
+            received_joint_names = set(msg.name)
+            missing_joint_names = self.expected_joint_names - received_joint_names
+            if missing_joint_names:
+                self.get_logger().warning(
+                    "Ignoring incomplete joint_states message; missing joints: "
+                    + ", ".join(sorted(missing_joint_names))
+                )
+                return
+
             self.get_logger().info(
                 f"""Received joint state message on {
                     self.resolve_topic_name(self.joint_states_topic)}."""
@@ -90,6 +111,10 @@ class WaitForRoboReady(Node):
 
     def description_callback(self, msg):
         if not self.robot_description_future.done():
+            if not msg.data.strip():
+                self.get_logger().warning("Ignoring empty robot_description message")
+                return
+
             self.get_logger().info(
                 f"""Received robot description on {
                     self.resolve_topic_name(self.description_topic)}."""
@@ -108,11 +133,24 @@ def main(args=None):
     rclpy.init(args=args)
 
     sub = WaitForRoboReady()
-    rclpy.spin_until_future_complete(sub, sub.robot_is_ready_future)
+    rclpy.spin_until_future_complete(
+        sub,
+        sub.robot_is_ready_future,
+        timeout_sec=sub.timeout_sec,
+    )
+
+    exit_code = 0
+    if not sub.robot_is_ready_future.done():
+        sub.get_logger().error(
+            f"Timed out after {sub.timeout_sec:.1f}s waiting for robot_description "
+            f"and complete joint_states on '{sub.joint_states_topic}'."
+        )
+        exit_code = 1
 
     sub.destroy_node()
     rclpy.shutdown()
+    return exit_code
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
