@@ -49,15 +49,24 @@ def test_readiness_accepts_transient_description_and_volatile_joint_states():
 
     try:
         deadline = time.monotonic() + 5.0
-        while not node.robot_is_ready_future.done() and time.monotonic() < deadline:
+        while not node.robot_description_future.done() and time.monotonic() < deadline:
             description = String()
             description.data = "<robot name='mock'/>"
             description_publisher.publish(description)
+            executor.spin_once(timeout_sec=0.1)
 
-            incomplete_joint_states = JointState()
-            incomplete_joint_states.name = ["joint_1", "joint_2"]
+        assert node.robot_description_future.done()
+
+        incomplete_joint_states = JointState()
+        incomplete_joint_states.name = ["joint_1", "joint_2"]
+        for _ in range(5):
             joint_states_publisher.publish(incomplete_joint_states)
+            executor.spin_once(timeout_sec=0.1)
 
+        assert not node.joint_states_future.done()
+
+        deadline = time.monotonic() + 5.0
+        while not node.robot_is_ready_future.done() and time.monotonic() < deadline:
             complete_joint_states = JointState()
             complete_joint_states.name = [f"joint_{index}" for index in range(1, 7)]
             joint_states_publisher.publish(complete_joint_states)
