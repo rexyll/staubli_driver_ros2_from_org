@@ -130,7 +130,7 @@ jobs:
               r"  if \(private_executor_\)\n"
               r"    private_executor_->cancel\(\);\n"
               r"  if \(private_executor_thread_\.joinable\(\)\)\n"
-              r"    private_executor_thread_->join\(\);\n)"
+              r"    private_executor_thread_\.join\(\);\n)"
           )
           tem_replacement = (
               r"\1"
