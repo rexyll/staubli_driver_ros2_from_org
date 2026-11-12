@@ -116,6 +116,16 @@ jobs:
 
           replace_once(
               r"^  return 0;\n}$",
+              "  RCLCPP_INFO(nh->get_logger(), \"shutdown probe before PSM reset: context_valid=%d\", "
+              "nh->get_node_base_interface()->get_context()->is_valid());\n"
+              "  planning_scene_monitor.reset();\n"
+              "  RCLCPP_INFO(nh->get_logger(), \"shutdown probe after PSM reset: context_valid=%d\", "
+              "nh->get_node_base_interface()->get_context()->is_valid());\n"
+              "  moveit_cpp.reset();\n"
+              "  RCLCPP_INFO(nh->get_logger(), \"shutdown probe after MoveItCpp reset: context_valid=%d\", "
+              "nh->get_node_base_interface()->get_context()->is_valid());\n"
+              "  nh.reset();\n"
+              "  printf(\"shutdown probe after main Node reset\\n\");\n"
               "  }\n  rclcpp::shutdown();\n  return 0;\n}",
               "main scope close",
           )
