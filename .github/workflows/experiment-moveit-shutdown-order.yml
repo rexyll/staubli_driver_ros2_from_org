@@ -96,7 +96,8 @@ jobs:
               "    {\n"
               "      pthread_kill(signal_waiter.native_handle(), SIGUSR1);\n"
               "    }\n"
-              "    signal_waiter.join();",
+              "    signal_waiter.join();\n"
+              "    executor.remove_node(nh);",
               "executor shutdown replacement",
           )
 
