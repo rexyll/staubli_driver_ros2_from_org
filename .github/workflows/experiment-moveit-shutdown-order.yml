@@ -31,7 +31,7 @@ jobs:
       - name: Fetch MoveIt Jazzy source and apply isolated teardown-order experiment
         shell: bash
         run: |
-          set -euo pipefail
+          set -eo pipefail
           mkdir -p /tmp/moveit_ws/src
           git clone --depth 1 --branch jazzy https://github.com/moveit/moveit2.git /tmp/moveit_ws/src/moveit2
           python3 - <<'PY'
@@ -77,14 +77,14 @@ jobs:
       - name: Install MoveIt source dependencies
         shell: bash
         run: |
-          set -euo pipefail
+          set -eo pipefail
           source /opt/ros/jazzy/setup.bash
           rosdep install --from-paths /tmp/moveit_ws/src/moveit2 --ignore-src --rosdistro jazzy -y
 
       - name: Build patched MoveIt move_group
         shell: bash
         run: |
-          set -euo pipefail
+          set -eo pipefail
           source /opt/ros/jazzy/setup.bash
           cd /tmp/moveit_ws
           colcon build --packages-up-to moveit_ros_move_group --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
@@ -92,7 +92,7 @@ jobs:
       - name: Fetch and build Stäubli mock workspace against patched MoveIt
         shell: bash
         run: |
-          set -euo pipefail
+          set -eo pipefail
           source /opt/ros/jazzy/setup.bash
           source /tmp/moveit_ws/install/setup.bash
           mkdir -p /tmp/staubli_ws/src
@@ -104,7 +104,7 @@ jobs:
       - name: Run mock planning and strict teardown regression
         shell: bash
         run: |
-          set -euo pipefail
+          set -eo pipefail
           source /opt/ros/jazzy/setup.bash
           source /tmp/moveit_ws/install/setup.bash
           source /tmp/staubli_ws/install/setup.bash
