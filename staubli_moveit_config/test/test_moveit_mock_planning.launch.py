@@ -86,7 +86,8 @@ class TestMockMoveItPlanning(unittest.TestCase):
         goal.request.start_state.is_diff = True
 
         constraints = Constraints()
-        for index, position in enumerate((0.11, 0.21, 0.31, 0.41, 0.51, 0.61), start=1):
+        target_positions = (0.11, 0.21, 0.31, 0.41, 0.51, 0.61)
+        for index, position in enumerate(target_positions, start=1):
             joint = JointConstraint()
             joint.joint_name = f"joint_{index}"
             joint.position = position
