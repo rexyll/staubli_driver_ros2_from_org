@@ -1,0 +1,94 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+    <xacro:include filename="$(find staubli_robot_description)/urdf/include/staubli_helpers.xacro" />
+    <xacro:include filename="$(find staubli_robot_description)/r2c/include/staubli_r2c_joints.xacro" />
+    <xacro:include filename="$(find staubli_robot_description)/r2c/include/staubli_r2c_gpios.xacro" />
+
+    <xacro:macro name="staubli_ros2_control" params="
+        name
+        robot_prefix:=^
+        robot_ip:=^
+        robot_model_parameters_file:=^
+        joint_limits_parameters_file:=^
+        initial_positions_file:=^
+        use_mock_hardware:=^
+        mock_sensor_commands:=^
+    ">
+
+    <xacro:load_robot_model_config robot_model_config_file="${robot_model_parameters_file}"/>
+    <xacro:load_initial_positions_config initial_positions_config_file="${initial_positions_file}"/>
+    <xacro:load_joint_limits_config joint_limits_config_file="${joint_limits_parameters_file}"/>
+
+    <ros2_control name="${name}" type="system">
+        <hardware>
+            <xacro:if value="${use_mock_hardware}">
+                <plugin>mock_components/GenericSystem</plugin>
+                <param name="calculate_dynamics">true</param>
+                <param name="state_following_offset">0.0</param>
+                <param name="mock_sensor_commands">${mock_sensor_commands}</param>
+            </xacro:if>
+            <xacro:unless value="${use_mock_hardware}">
+                <plugin>staubli_robot_driver/StaubliHardwareInterface</plugin>
+                <param name="robot_prefix">${robot_prefix}</param>
+                <param name="robot_ip">${robot_ip}</param>
+                <param name="control_port">11000</param>
+                <param name="diagnostic_port">11001</param>
+                <param name="local_control_port">11000</param>
+                <param name="local_diagnostic_port">11001</param>
+                <param name="num_digital_inputs">${num_digital_inputs}</param>
+                <param name="num_digital_outputs">${num_digital_outputs}</param>
+                <param name="num_analog_inputs">${num_analog_inputs}</param>
+                <param name="num_analog_outputs">${num_analog_outputs}</param>
+            </xacro:unless>
+        </hardware>
+
+        <!-- Actuated joints -->
+
+        <xacro:if value="${use_mock_hardware}">
+            <xacro:property name="include_acceleration_command" value="false"/>
+        </xacro:if>
+        <xacro:unless value="${use_mock_hardware}">
+             <!-- Note: acceleration command interface is ONLY used to set the acceleration limits... -->
+            <xacro:property name="include_acceleration_command" value="true"/>
+        </xacro:unless>
+
+        <xacro:r2c_joints_control_description
+            robot_prefix="${robot_prefix}"
+            joint_names="${joint_names}"
+            initial_positions="${initial_positions}"
+            has_joint_torque_sensor="${has_joint_torque_sensor}"
+            has_joint_torque_control="false"
+            include_acceleration_command="${include_acceleration_command}"
+        />
+
+        <!-- Virtual GPIOs for Control / Supervision -->
+
+
+        <gpio name="${robot_prefix}supervision">
+            <!-- Integers -->
+            <state_interface name="operation_mode"/>
+            <state_interface name="operation_mode_status"/>
+            <state_interface name="safety_status"/>
+            <state_interface name="control_sequence_delay"/>
+            <!-- Booleans -->
+            <state_interface name="brakes_released"/>
+            <state_interface name="motion_possible"/>
+            <state_interface name="in_motion"/>
+            <state_interface name="in_error"/>
+            <state_interface name="estop_pressed"/>
+            <state_interface name="wait_for_ack"/>
+        </gpio>
+
+        <!-- GPIOs -->
+
+        <xacro:r2c_gpios_control_description
+            robot_prefix="${robot_prefix}"
+            num_digital_inputs="${num_digital_inputs}"
+            num_digital_outputs="${num_digital_outputs}"
+            num_analog_inputs="${num_analog_inputs}"
+            num_analog_outputs="${num_analog_outputs}"
+        />
+    </ros2_control>
+    </xacro:macro>
+</robot>

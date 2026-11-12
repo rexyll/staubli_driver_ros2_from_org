@@ -1,0 +1,17 @@
+build/
+install/
+log/
+
+# Staubli robot logs
+.staubli_robot_logs/
+
+# Python cache files
+**/__pycache__/**
+**/.venv/
+
+# Documentation build files
+staubli_driver_ros2/doxygen/_build/**
+staubli_driver_ros2/sphinx/_build/**
+staubli_driver_ros2/pdf/**
+staubli_driver_ros2/documentation.html
+staubli_driver_ros2-*.tar.gz

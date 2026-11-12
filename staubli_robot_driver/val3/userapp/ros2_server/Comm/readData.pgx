@@ -1,0 +1,55 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Programs xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns="http://www.staubli.com/robotics/VAL3/Program/2">
+  <Program name="readData">
+    <Parameters xmlns="http://www.staubli.com/robotics/VAL3/Param/1">
+      <Parameter name="x_UdpSocket" type="sio" xsi:type="element" use="reference" />
+      <Parameter name="x_nData" type="num" xsi:type="array" use="reference" />
+      <Parameter name="x_bNewData" type="bool" xsi:type="element" use="reference" />
+      <Parameter name="x_bError" type="bool" xsi:type="element" use="reference" />
+    </Parameters>
+    <Locals>
+      <Local name="l_bNewData" type="bool" xsi:type="array" size="1" />
+      <Local name="l_bError" type="bool" xsi:type="array" size="1" />
+      <Local name="l_nMaxAttempts" type="num" xsi:type="array" size="1" />
+      <Local name="l_nAttempt" type="num" xsi:type="array" size="1" />
+    </Locals>
+    <Code><![CDATA[begin
+
+  l_bNewData = false
+  l_bError = false
+  l_nMaxAttempts = 2
+  l_nAttempt = 1
+
+  // Initialize output flags
+  x_bNewData = l_bNewData
+  x_bError = l_bError
+
+  // Try to read from UDP socket multiple times
+  while(l_nAttempt <= l_nMaxAttempts)
+    call readDataOnce(x_UdpSocket, x_nData, l_bNewData, l_bError)
+
+    // If error, set error and exit
+    if(l_bError)
+      logMsg("ros2_server::readData : communication error", 2)
+      x_bNewData = false
+      x_bError = true
+      return
+    endIf
+
+    // If new (valid) data received, set flag
+    if(l_bNewData)
+      // Successfully read a new message
+      x_bNewData = true
+    endIf
+
+    // If data received, but last attempt did not yield new data, exit
+    if(x_bNewData and !l_bNewData)
+      return
+    endIf
+
+    // Prepare next attempt
+    l_nAttempt = l_nAttempt + 1
+  endWhile
+end]]></Code>
+  </Program>
+</Programs>
