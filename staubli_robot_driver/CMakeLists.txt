@@ -212,4 +212,4 @@ install(TARGETS test_receive_robot_state
 # Export plugin
 pluginlib_export_plugin_description_file(hardware_interface staubli_hardware_interface.xml)
 
-ament_package()
+ament_package(CONFIG_EXTRAS cmake/BoostDependencies.cmake)
