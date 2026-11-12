@@ -12,10 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import signal
 import time
 import unittest
 
 import launch
+import launch_testing
 import launch_testing.actions
 from ament_index_python.packages import get_package_share_directory
 from controller_manager_msgs.srv import ListControllers
@@ -144,6 +146,13 @@ class TestMockMoveItPlanning(unittest.TestCase):
             set(result.planned_trajectory.joint_trajectory.joint_names),
             {f"joint_{index}" for index in range(1, 7)},
         )
-        # Let controller activation finish before launch_testing starts
-        # SIGINT teardown of the included bringup launch.
-        time.sleep(1.0)
+
+
+@launch_testing.post_shutdown_test()
+class TestMockMoveItPlanningShutdown(unittest.TestCase):
+    def test_all_processes_exit_cleanly(self, proc_info):
+        """Reject crashes and unexpected exits during launch teardown."""
+        launch_testing.asserts.assertExitCodes(
+            proc_info,
+            allowable_exit_codes=[launch_testing.asserts.EXIT_OK, -signal.SIGINT],
+        )
