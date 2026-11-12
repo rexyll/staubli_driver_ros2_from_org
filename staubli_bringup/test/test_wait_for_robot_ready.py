@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import sys
+import importlib.util
 import time
 from pathlib import Path
 
@@ -22,8 +22,11 @@ from rclpy.qos import QoSDurabilityPolicy, QoSProfile
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from wait_for_robot_ready import WaitForRoboReady
+module_path = Path(__file__).resolve().parents[1] / "scripts" / "wait_for_robot_ready.py"
+module_spec = importlib.util.spec_from_file_location("wait_for_robot_ready", module_path)
+wait_for_robot_ready = importlib.util.module_from_spec(module_spec)
+module_spec.loader.exec_module(wait_for_robot_ready)
+WaitForRoboReady = wait_for_robot_ready.WaitForRoboReady
 
 
 def test_readiness_accepts_transient_description_and_volatile_joint_states():
