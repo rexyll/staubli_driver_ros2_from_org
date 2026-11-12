@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import signal
 import time
 import unittest
@@ -44,6 +45,7 @@ def generate_test_description():
             "start_controller": "joint_trajectory_controller",
         }.items(),
     )
+    move_group_prefix = os.environ.get("STAUBLI_MOVE_GROUP_GDB_PREFIX", "")
     moveit_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             get_package_share_directory("staubli_bringup") + "/launch/launch_moveit.launch.py"
@@ -52,6 +54,7 @@ def generate_test_description():
             "robot_model": "tx2_60l",
             "gui": "false",
             "launch_servo": "false",
+            "move_group_prefix": move_group_prefix,
             "warehouse_sqlite_path": "/tmp/staubli_moveit_mock_warehouse.sqlite",
         }.items(),
     )
@@ -154,5 +157,9 @@ class TestMockMoveItPlanningShutdown(unittest.TestCase):
         """Reject crashes and unexpected exits during launch teardown."""
         launch_testing.asserts.assertExitCodes(
             proc_info,
-            allowable_exit_codes=[launch_testing.asserts.EXIT_OK, -signal.SIGINT],
+            allowable_exit_codes=[
+                launch_testing.asserts.EXIT_OK,
+                -signal.SIGINT,
+                *([128 + signal.SIGINT] if os.environ.get("STAUBLI_MOVE_GROUP_GDB_PREFIX") else []),
+            ],
         )
