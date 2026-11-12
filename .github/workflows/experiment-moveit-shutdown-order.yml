@@ -124,20 +124,20 @@ jobs:
           )
           tem_source = tem_path.read_text()
           tem_pattern = (
-              r"(TrajectoryExecutionManager::~TrajectoryExecutionManager\\(\\)\\n"
-              r"\\{\\n"
-              r"  stopExecution\\(true\\);\\n"
-              r"  if \\(private_executor_\\)\\n"
-              r"    private_executor_->cancel\\(\\);\\n"
-              r"  if \\(private_executor_thread_\\.joinable\\(\\)\\)\\n"
-              r"    private_executor_thread_->join\\(\\);\\n)"
+              r"(TrajectoryExecutionManager::~TrajectoryExecutionManager\(\)\n"
+              r"\{\n"
+              r"  stopExecution\(true\);\n"
+              r"  if \(private_executor_\)\n"
+              r"    private_executor_->cancel\(\);\n"
+              r"  if \(private_executor_thread_\.joinable\(\)\)\n"
+              r"    private_executor_thread_->join\(\);\n)"
           )
           tem_replacement = (
-              r"\\1"
-              "  if (private_executor_ && controller_mgr_node_)\\n"
-              "  {\\n"
-              "    private_executor_->remove_node(controller_mgr_node_);\\n"
-              "  }\\n"
+              r"\1"
+              "  if (private_executor_ && controller_mgr_node_)\n"
+              "  {\n"
+              "    private_executor_->remove_node(controller_mgr_node_);\n"
+              "  }\n"
           )
           tem_updated, tem_count = re.subn(tem_pattern, tem_replacement, tem_source, count=1)
           if tem_count != 1:
