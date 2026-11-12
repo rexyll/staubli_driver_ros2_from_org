@@ -29,8 +29,7 @@ from rclpy.node import Node
 def generate_test_description():
     bringup_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
-            get_package_share_directory("staubli_bringup")
-            + "/launch/launch_robot_control.launch.py"
+            get_package_share_directory("staubli_bringup") + "/launch/launch_robot_control.launch.py"
         ),
         launch_arguments={
             "robot_model": "tx2_60l",
@@ -42,8 +41,7 @@ def generate_test_description():
     )
     moveit_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
-            get_package_share_directory("staubli_bringup")
-            + "/launch/launch_moveit.launch.py"
+            get_package_share_directory("staubli_bringup") + "/launch/launch_moveit.launch.py"
         ),
         launch_arguments={
             "robot_model": "tx2_60l",
