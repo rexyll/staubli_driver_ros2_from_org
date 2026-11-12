@@ -72,7 +72,7 @@ jobs:
           PY
           rosdep install --from-paths /tmp/rclcpp_ws/src/rclcpp/rclcpp --ignore-src --rosdistro jazzy -y
           cd /tmp/rclcpp_ws
-          colcon build --packages-select rclcpp --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_FLAGS_RELWITHDEBINFO='-O1 -g -fno-omit-frame-pointer' -DBUILD_TESTING=OFF
+          colcon build --packages-select rclcpp --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_FLAGS='-O1 -g -fno-omit-frame-pointer -fsanitize=address' -DCMAKE_CXX_FLAGS='-O1 -g -fno-omit-frame-pointer -fsanitize=address' -DCMAKE_EXE_LINKER_FLAGS='-fsanitize=address' -DCMAKE_SHARED_LINKER_FLAGS='-fsanitize=address' -DBUILD_TESTING=OFF
 
       - name: Fetch MoveIt Jazzy source and apply controlled signal-wait and teardown-order experiment
         shell: bash
@@ -322,7 +322,7 @@ jobs:
           source /opt/ros/jazzy/setup.bash
           source /tmp/rclcpp_ws/install/setup.bash
           cd /tmp/moveit_ws
-          colcon build --packages-up-to moveit_ros_move_group --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_FLAGS_RELWITHDEBINFO='-O1 -g -fno-omit-frame-pointer' -DBUILD_TESTING=OFF
+          colcon build --packages-up-to moveit_ros_move_group --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_FLAGS='-O1 -g -fno-omit-frame-pointer -fsanitize=address' -DCMAKE_CXX_FLAGS='-O1 -g -fno-omit-frame-pointer -fsanitize=address' -DCMAKE_EXE_LINKER_FLAGS='-fsanitize=address' -DCMAKE_SHARED_LINKER_FLAGS='-fsanitize=address' -DBUILD_TESTING=OFF
 
       - name: Fetch and build Stäubli mock workspace against patched MoveIt
         shell: bash
@@ -335,7 +335,7 @@ jobs:
           git clone --depth 1 --branch fix/mock-planning-shutdown-and-controller-gates https://github.com/rexyll/staubli_driver_ros2_from_org.git /tmp/staubli_ws/src/staubli_driver_ros2
           rosdep install --from-paths /tmp/staubli_ws/src --ignore-src --rosdistro jazzy -y
           cd /tmp/staubli_ws
-          colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+          colcon build --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_FLAGS='-O1 -g -fno-omit-frame-pointer -fsanitize=address' -DCMAKE_CXX_FLAGS='-O1 -g -fno-omit-frame-pointer -fsanitize=address' -DCMAKE_EXE_LINKER_FLAGS='-fsanitize=address' -DCMAKE_SHARED_LINKER_FLAGS='-fsanitize=address' -DBUILD_TESTING=ON
 
       - name: Run mock planning and strict teardown regression
         shell: bash
@@ -345,6 +345,7 @@ jobs:
           source /tmp/rclcpp_ws/install/setup.bash
           source /tmp/moveit_ws/install/setup.bash
           source /tmp/staubli_ws/install/setup.bash
+          export ASAN_OPTIONS='detect_leaks=0:abort_on_error=1:fast_unwind_on_malloc=0:strict_string_checks=1'
           cd /tmp/staubli_ws
           colcon test --packages-select staubli_moveit_config --event-handlers console_direct+ --return-code-on-test-failure
           colcon test-result --verbose
