@@ -16,8 +16,9 @@
 # From ur_robot_driver/scripts/wait_for_robot_description.py
 # Copyright (c) 2024 FZI Forschungszentrum Informatik
 
-import rclpy
 import sys
+
+import rclpy
 from rclpy.node import Node
 
 from sensor_msgs.msg import JointState
@@ -55,18 +56,24 @@ class WaitForRoboReady(Node):
         if self.timeout_sec <= 0.0:
             raise ValueError("timeout_sec must be greater than zero")
 
-        qos_profile = QoSProfile(
+        description_qos = QoSProfile(
             depth=1,
             durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
         )
+        # joint_state_broadcaster publishes with volatile durability by default.
+        # A transient-local subscriber would be QoS-incompatible and never receive it.
+        joint_states_qos = QoSProfile(depth=10)
         self.robot_description_subscription = self.create_subscription(
-            String, self.description_topic, self.description_callback, qos_profile=qos_profile
+            String,
+            self.description_topic,
+            self.description_callback,
+            qos_profile=description_qos,
         )
         self.joint_states_subscription = self.create_subscription(
             JointState,
             self.joint_states_topic,
             self.joint_states_callback,
-            qos_profile=qos_profile,
+            qos_profile=joint_states_qos,
         )
         self.robot_description_future = Future()
         self.joint_states_future = Future()
