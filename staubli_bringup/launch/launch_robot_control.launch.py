@@ -18,11 +18,14 @@ from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
     ExecuteProcess,
+    LogError,
     LogInfo,
     RegisterEventHandler,
+    EmitEvent,
 )
 from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessExit
+from launch.events import Shutdown
 from launch.substitutions import (
     Command,
     EqualsSubstitution,
@@ -176,29 +179,50 @@ def generate_launch_description():
         activation_condition = IfCondition(
             EqualsSubstitution(LaunchConfiguration("start_controller"), controller_name)
         )
+        def on_controller_spawner_exit(event, context):
+            if event.returncode != 0:
+                return [
+                    LogError(
+                        msg=(
+                            f"Failed to spawn controller '{controller_name}' "
+                            f"(exit code: {event.returncode}); shutting down bringup."
+                        )
+                    ),
+                    EmitEvent(
+                        event=Shutdown(
+                            reason=(
+                                f"Controller spawner for '{controller_name}' "
+                                f"failed with exit code {event.returncode}"
+                            )
+                        )
+                    ),
+                ]
+
+            return [
+                LogInfo(
+                    condition=activation_condition,
+                    msg=[
+                        "\033[32mStarting controller ",
+                        controller_name,
+                        "\033[0m",
+                    ],
+                ),
+                ExecuteProcess(
+                    condition=activation_condition,
+                    cmd=[
+                        "ros2",
+                        "control",
+                        "set_controller_state",
+                        controller_name,
+                        "active",
+                    ],
+                ),
+            ]
+
         post_load_action = RegisterEventHandler(
             OnProcessExit(
                 target_action=load_node,
-                on_exit=[
-                    LogInfo(
-                        condition=activation_condition,
-                        msg=[
-                            "\033[32mStarting controller ",
-                            controller_name,
-                            "\033[0m",
-                        ],
-                    ),
-                    ExecuteProcess(
-                        condition=activation_condition,
-                        cmd=[
-                            "ros2",
-                            "control",
-                            "set_controller_state",
-                            controller_name,
-                            "active",
-                        ],
-                    ),
-                ],
+                on_exit=on_controller_spawner_exit,
             )
         )
         return [load_node, post_load_action]
