@@ -53,7 +53,7 @@ class TestMockBringup(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         rclpy.init()
-        cls.node = Node("test_sta ubli_mock_bringup".replace(" ", "_"))
+        cls.node = Node("test_staubli_mock_bringup")
 
     @classmethod
     def tearDownClass(cls):
