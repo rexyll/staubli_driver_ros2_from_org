@@ -55,6 +55,17 @@ jobs:
           )
 
           replace_once(
+              r"^  const auto moveit_cpp = std::make_shared<moveit_cpp::MoveItCpp>\(nh, moveit_cpp_options\);$",
+              "  auto moveit_cpp = std::make_shared<moveit_cpp::MoveItCpp>(nh, moveit_cpp_options);",
+              "mutable MoveItCpp handle",
+          )
+          replace_once(
+              r"^  const auto planning_scene_monitor = moveit_cpp->getPlanningSceneMonitorNonConst\(\);$",
+              "  auto planning_scene_monitor = moveit_cpp->getPlanningSceneMonitorNonConst();",
+              "mutable planning scene monitor handle",
+          )
+
+          replace_once(
               r"^  rclcpp::init\(argc, argv\);$",
               "  sigset_t shutdown_signals;\n"
               "  sigemptyset(&shutdown_signals);\n"
@@ -97,7 +108,9 @@ jobs:
               "      pthread_kill(signal_waiter.native_handle(), SIGUSR1);\n"
               "    }\n"
               "    signal_waiter.join();\n"
-              "    executor.remove_node(nh);",
+              "    executor.remove_node(nh);\n"
+              "    RCLCPP_INFO(nh->get_logger(), \"shutdown probe after outer executor detach: context_valid=%d\", "
+              "nh->get_node_base_interface()->get_context()->is_valid());",
               "executor shutdown replacement",
           )
 
