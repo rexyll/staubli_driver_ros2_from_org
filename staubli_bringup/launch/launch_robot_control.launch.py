@@ -244,6 +244,7 @@ def generate_launch_description():
                 ),
             ]
 
+        # Do not report activation success until the CLI process exits cleanly.
         activation_exit_handler = RegisterEventHandler(
             OnProcessExit(target_action=activation_process, on_exit=on_activation_exit)
         )
