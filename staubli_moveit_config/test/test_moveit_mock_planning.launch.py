@@ -155,11 +155,14 @@ class TestMockMoveItPlanning(unittest.TestCase):
 class TestMockMoveItPlanningShutdown(unittest.TestCase):
     def test_all_processes_exit_cleanly(self, proc_info):
         """Reject crashes and unexpected exits during launch teardown."""
+        allowable_exit_codes = [
+            launch_testing.asserts.EXIT_OK,
+            -signal.SIGINT,
+        ]
+        if os.environ.get("STAUBLI_MOVE_GROUP_GDB_PREFIX"):
+            allowable_exit_codes.append(128 + signal.SIGINT)
+
         launch_testing.asserts.assertExitCodes(
             proc_info,
-            allowable_exit_codes=[
-                launch_testing.asserts.EXIT_OK,
-                -signal.SIGINT,
-                *([128 + signal.SIGINT] if os.environ.get("STAUBLI_MOVE_GROUP_GDB_PREFIX") else []),
-            ],
+            allowable_exit_codes=allowable_exit_codes,
         )
