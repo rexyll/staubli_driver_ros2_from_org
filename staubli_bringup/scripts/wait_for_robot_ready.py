@@ -25,7 +25,7 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 
 from rclpy.task import Future
-from rclpy.qos import QoSProfile, QoSDurabilityPolicy
+from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy
 
 
 class WaitForRoboReady(Node):
@@ -62,7 +62,10 @@ class WaitForRoboReady(Node):
         )
         # joint_state_broadcaster publishes with volatile durability by default.
         # A transient-local subscriber would be QoS-incompatible and never receive it.
-        joint_states_qos = QoSProfile(depth=10)
+        joint_states_qos = QoSProfile(
+            depth=10,
+            reliability=QoSReliabilityPolicy.BEST_EFFORT,
+        )
         self.robot_description_subscription = self.create_subscription(
             String,
             self.description_topic,
