@@ -65,6 +65,7 @@ class WaitForRoboReady(Node):
         joint_states_qos = QoSProfile(
             depth=10,
             reliability=QoSReliabilityPolicy.BEST_EFFORT,
+            durability=QoSDurabilityPolicy.VOLATILE,
         )
         self.robot_description_subscription = self.create_subscription(
             String,
