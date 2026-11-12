@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import time
 import unittest
 
 import launch
@@ -21,7 +20,7 @@ from ament_index_python.packages import get_package_share_directory
 from launch.actions import IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from moveit_msgs.action import MoveGroup
-from moveit_msgs.msg import JointConstraint, MoveItErrorCodes
+from moveit_msgs.msg import Constraints, JointConstraint, MoveItErrorCodes
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.node import Node
@@ -86,7 +85,7 @@ class TestMockMoveItPlanning(unittest.TestCase):
         goal.request.num_planning_attempts = 2
         goal.request.start_state.is_diff = True
 
-        constraints = goal.request.goal_constraints.add()
+        constraints = Constraints()
         for index, position in enumerate((0.11, 0.21, 0.31, 0.41, 0.51, 0.61), start=1):
             joint = JointConstraint()
             joint.joint_name = f"joint_{index}"
@@ -95,6 +94,7 @@ class TestMockMoveItPlanning(unittest.TestCase):
             joint.tolerance_below = 0.03
             joint.weight = 1.0
             constraints.joint_constraints.append(joint)
+        goal.request.goal_constraints.append(constraints)
 
         goal.planning_options.plan_only = True
         goal.planning_options.replan = False
