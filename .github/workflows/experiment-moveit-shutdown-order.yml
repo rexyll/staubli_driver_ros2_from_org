@@ -117,6 +117,41 @@ jobs:
               raise SystemExit("Signal waiter lifecycle validation failed.")
 
           path.write_text(source)
+
+          tem_path = Path(
+              "/tmp/moveit_ws/src/moveit2/moveit_ros/planning/trajectory_execution_manager/src/"
+              "trajectory_execution_manager.cpp"
+          )
+          tem_source = tem_path.read_text()
+          tem_pattern = (
+              r"(TrajectoryExecutionManager::~TrajectoryExecutionManager\\(\\)\\n"
+              r"\\{\\n"
+              r"  stopExecution\\(true\\);\\n"
+              r"  if \\(private_executor_\\)\\n"
+              r"    private_executor_->cancel\\(\\);\\n"
+              r"  if \\(private_executor_thread_\\.joinable\\(\\)\\)\\n"
+              r"    private_executor_thread_->join\\(\\);\\n)"
+          )
+          tem_replacement = (
+              r"\\1"
+              "  if (private_executor_ && controller_mgr_node_)\\n"
+              "  {\\n"
+              "    private_executor_->remove_node(controller_mgr_node_);\\n"
+              "  }\\n"
+          )
+          tem_updated, tem_count = re.subn(tem_pattern, tem_replacement, tem_source, count=1)
+          if tem_count != 1:
+              raise SystemExit(
+                  f"Expected exactly one TrajectoryExecutionManager destructor anchor, found {tem_count}; "
+                  "refusing to patch."
+              )
+          tem_source = tem_updated
+          if tem_source.count("private_executor_->remove_node(controller_mgr_node_);") != 1:
+              raise SystemExit("Internal controller-manager executor detach validation failed.")
+          tem_path.write_text(tem_source)
+
+          print("Applied explicit detach to both move_group and controller-manager executors.")
+          print("Validated internal executor cancel, join, then remove_node(controller_mgr_node_) teardown order.")
           print("Applied structured MoveIt Jazzy signal-wait patch.")
           print("Validated unique include/init/executor/spin/main anchors and deferred context shutdown.")
           PY
