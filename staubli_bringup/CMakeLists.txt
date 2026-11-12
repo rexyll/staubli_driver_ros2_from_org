@@ -21,7 +21,9 @@ install(PROGRAMS
 
 if(BUILD_TESTING)
   find_package(ament_cmake_pytest REQUIRED)
+  find_package(launch_testing_ament_cmake REQUIRED)
   ament_add_pytest_test(test_wait_for_robot_ready test/test_wait_for_robot_ready.py)
+  add_launch_test(test/test_mock_bringup.launch.py TIMEOUT 120)
 endif()
 
 ament_package()
