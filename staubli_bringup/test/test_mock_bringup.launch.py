@@ -69,9 +69,7 @@ class TestMockBringup(unittest.TestCase):
         while time.monotonic() < deadline:
             if client.wait_for_service(timeout_sec=0.5):
                 future = client.call_async(ListControllers.Request())
-                rclpy.spin_until_future_complete(
-                    self.node, future, timeout_sec=5.0
-                )
+                rclpy.spin_until_future_complete(self.node, future, timeout_sec=5.0)
                 if future.done() and future.result() is not None:
                     response = future.result()
                     states = {item.name: item.state for item in response.controller}
@@ -82,7 +80,9 @@ class TestMockBringup(unittest.TestCase):
                         break
             time.sleep(0.2)
 
-        self.assertIsNotNone(response, "controller_manager list_controllers did not respond")
+        self.assertIsNotNone(
+            response, "controller_manager list_controllers did not respond"
+        )
         states = {item.name: item.state for item in response.controller}
         self.assertEqual(states.get("joint_state_broadcaster"), "active", states)
         self.assertEqual(states.get("joint_trajectory_controller"), "active", states)
