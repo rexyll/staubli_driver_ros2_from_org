@@ -19,4 +19,9 @@ install(PROGRAMS
 )
 
 
+if(BUILD_TESTING)
+  find_package(ament_cmake_pytest REQUIRED)
+  ament_add_pytest_test(test_wait_for_robot_ready test/test_wait_for_robot_ready.py)
+endif()
+
 ament_package()
