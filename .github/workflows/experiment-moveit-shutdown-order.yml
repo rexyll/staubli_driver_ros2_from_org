@@ -359,6 +359,69 @@ jobs:
           source /tmp/moveit_ws/install/setup.bash
           mkdir -p /tmp/staubli_ws/src
           git clone --depth 1 --branch fix/mock-planning-shutdown-and-controller-gates https://github.com/rexyll/staubli_driver_ros2_from_org.git /tmp/staubli_ws/src/staubli_driver_ros2
+          python3 - <<'PY'
+          from pathlib import Path
+          
+          path = Path("/tmp/staubli_ws/src/staubli_driver_ros2/staubli_moveit_config/test/test_moveit_mock_planning.launch.py")
+          source = path.read_text()
+          
+          import_anchor = "from controller_manager_msgs.srv import ListControllers\\n"
+          if source.count(import_anchor) != 1:
+              raise SystemExit("Expected one ListControllers import; refusing to patch.")
+          source = source.replace(
+              import_anchor,
+              import_anchor + "from controller_manager_msgs.srv import SwitchController\\n",
+              1,
+          )
+          
+          test_anchor = """        self.assertEqual(
+                      set(result.planned_trajectory.joint_trajectory.joint_names),
+                      {f"joint_{index}" for index in range(1, 7)},
+                  )
+          """
+          test_replacement = test_anchor + """
+                  # Deactivate through controller_manager's switch service while its
+                  # control loop is alive. This avoids racing its pre-shutdown callback
+                  # against JointTrajectoryController::update() during process teardown.
+                  switch_client = self.node.create_client(
+                      SwitchController, "/controller_manager/switch_controller"
+                  )
+                  self.assertTrue(
+                      switch_client.wait_for_service(timeout_sec=15.0),
+                      "controller_manager switch_controller service did not become available",
+                  )
+                  switch_request = SwitchController.Request()
+                  switch_request.deactivate_controllers = ["joint_trajectory_controller"]
+                  switch_request.strictness = SwitchController.Request.STRICT
+                  switch_future = switch_client.call_async(switch_request)
+                  rclpy.spin_until_future_complete(self.node, switch_future, timeout_sec=20.0)
+                  self.assertTrue(switch_future.done(), "controller deactivation timed out")
+                  switch_response = switch_future.result()
+                  self.assertIsNotNone(switch_response)
+                  self.assertTrue(switch_response.ok, "joint_trajectory_controller deactivation failed")
+          
+                  deadline = time.monotonic() + 10.0
+                  controller_inactive = False
+                  while time.monotonic() < deadline:
+                      future = controller_client.call_async(ListControllers.Request())
+                      rclpy.spin_until_future_complete(self.node, future, timeout_sec=3.0)
+                      if future.done() and future.result() is not None:
+                          states = {item.name: item.state for item in future.result().controller}
+                          controller_inactive = states.get("joint_trajectory_controller") == "inactive"
+                          if controller_inactive:
+                              break
+                      time.sleep(0.1)
+                  self.assertTrue(
+                      controller_inactive,
+                      "joint_trajectory_controller did not reach inactive state before shutdown",
+                  )
+          """
+          if source.count(test_anchor) != 1:
+              raise SystemExit("Expected one completed planning assertion block; refusing to patch.")
+          source = source.replace(test_anchor, test_replacement, 1)
+          path.write_text(source)
+          print("Added orderly controller deactivation after plan-only test and before launch shutdown.")
+          PY
           rosdep install --from-paths /tmp/staubli_ws/src --ignore-src --rosdistro jazzy -y
           cd /tmp/staubli_ws
           colcon build --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_FLAGS='-O1 -g -fno-omit-frame-pointer -fsanitize=address' -DCMAKE_CXX_FLAGS='-O1 -g -fno-omit-frame-pointer -fsanitize=address' -DCMAKE_EXE_LINKER_FLAGS='-fsanitize=address' -DCMAKE_SHARED_LINKER_FLAGS='-fsanitize=address' -DBUILD_TESTING=ON
