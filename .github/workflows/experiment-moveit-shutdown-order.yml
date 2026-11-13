@@ -78,16 +78,15 @@ jobs:
               raise SystemExit("Expected exactly one upstream rclcpp::shutdown anchor.")
           if "sigwait(" in source or "SignalHandlerOptions::None" in source:
               raise SystemExit("Unexpected custom signal handling in upstream baseline.")
-          shutdown_anchor = "    executor.spin();\\n\\n    rclcpp::shutdown();"
+          shutdown_anchor = "    rclcpp::shutdown();"
           if source.count(shutdown_anchor) != 1:
-              raise SystemExit("Expected exactly one executor.spin()/shutdown() boundary.")
+              raise SystemExit("Expected exactly one upstream rclcpp::shutdown call.")
           source = source.replace(
               shutdown_anchor,
-              "    executor.spin();\\n\\n"
               "    RCLCPP_INFO(nh->get_logger(), \"shutdown A/B: stopping PSM scene publisher before Context shutdown\");\\n"
               "    planning_scene_monitor->stopPublishingPlanningScene();\\n"
               "    RCLCPP_INFO(nh->get_logger(), \"shutdown A/B: PSM scene publisher stopped and joined\");\\n"
-              "    rclcpp::shutdown();",
+              + shutdown_anchor,
               1,
           )
           path.write_text(source)
