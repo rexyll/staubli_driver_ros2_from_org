@@ -53,37 +53,37 @@ jobs:
           replace_once(callback, "  std::fprintf(stderr, \"[RCLCPP_SHUTDOWN_PROBE] CallbackGroup dtor complete this=%p\\n\", this);\n}\n", "  std::fprintf(stderr, \"[RCLCPP_SHUTDOWN_PROBE] CallbackGroup dtor complete this=%p\\n\", this);\n  {\n    std::lock_guard<std::mutex> lock(mutex_);\n    std::fprintf(stderr, \"[RCLCPP_SHUTDOWN_PROBE] CallbackGroup weak vectors this=%p subscriptions=%zu timers=%zu services=%zu clients=%zu waitables=%zu service_data=%p\\n\", this, subscription_ptrs_.size(), timer_ptrs_.size(), service_ptrs_.size(), client_ptrs_.size(), waitable_ptrs_.size(), static_cast<void *>(service_ptrs_.data()));\n    for (size_t index = 0; index < service_ptrs_.size(); ++index) {\n      std::fprintf(stderr, \"[RCLCPP_SHUTDOWN_PROBE] service weak inspect begin this=%p index=%zu slot=%p\\n\", this, index, static_cast<const void *>(&service_ptrs_[index]));\n      std::fflush(stderr);\n      const auto use_count = service_ptrs_[index].use_count();\n      const auto expired = service_ptrs_[index].expired();\n      std::fprintf(stderr, \"[RCLCPP_SHUTDOWN_PROBE] service weak inspect end this=%p index=%zu use_count=%ld expired=%d\\n\", this, index, static_cast<long>(use_count), static_cast<int>(expired));\n    }\n  }\n}\n", "CallbackGroup ServiceBase weak pointer audit")
           replace_once(callback, "      const auto expired = service_ptrs_[index].expired();\n", "      const auto expired = service_ptrs_[index].expired();\n      std::fflush(stderr);\n      service_ptrs_[index].reset();\n      std::fflush(stderr);\n", "per-entry ServiceBase weak pointer reset")
           add_service_old = r"""CallbackGroup::add_service(const rclcpp::ServiceBase::SharedPtr service_ptr)
-{
-  std::lock_guard<std::mutex> lock(mutex_);
-  service_ptrs_.push_back(service_ptr);
-  service_ptrs_.erase(
-    std::remove_if(
-      service_ptrs_.begin(),
-      service_ptrs_.end(),
-      [](rclcpp::ServiceBase::WeakPtr x) {return x.expired();}),
-    service_ptrs_.end());
-}
-"""
+          {
+            std::lock_guard<std::mutex> lock(mutex_);
+            service_ptrs_.push_back(service_ptr);
+            service_ptrs_.erase(
+              std::remove_if(
+                service_ptrs_.begin(),
+                service_ptrs_.end(),
+                [](rclcpp::ServiceBase::WeakPtr x) {return x.expired();}),
+              service_ptrs_.end());
+          }
+          """
           add_service_new = r"""CallbackGroup::add_service(const rclcpp::ServiceBase::SharedPtr service_ptr)
-{
-  std::lock_guard<std::mutex> lock(mutex_);
-  service_ptrs_.push_back(service_ptr);
-  service_ptrs_.erase(
-    std::remove_if(
-      service_ptrs_.begin(),
-      service_ptrs_.end(),
-      [](rclcpp::ServiceBase::WeakPtr x) {return x.expired();}),
-    service_ptrs_.end());
-  if (service_ptrs_.size() >= 20) {
-    std::fprintf(stderr, "[RCLCPP_SHUTDOWN_PROBE] add_service snapshot group=%p incoming=%p name=%s count=%zu\n", static_cast<void *>(this), static_cast<void *>(service_ptr.get()), service_ptr->get_service_name(), service_ptrs_.size());
-    for (size_t index = 0; index < service_ptrs_.size(); ++index) {
-      auto retained_service = service_ptrs_[index].lock();
-      std::fprintf(stderr, "[RCLCPP_SHUTDOWN_PROBE] add_service slot group=%p index=%zu service=%p name=%s\n", static_cast<void *>(this), index, static_cast<void *>(retained_service.get()), retained_service ? retained_service->get_service_name() : "<expired>");
-    }
-    std::fflush(stderr);
-  }
-}
-"""
+          {
+            std::lock_guard<std::mutex> lock(mutex_);
+            service_ptrs_.push_back(service_ptr);
+            service_ptrs_.erase(
+              std::remove_if(
+                service_ptrs_.begin(),
+                service_ptrs_.end(),
+                [](rclcpp::ServiceBase::WeakPtr x) {return x.expired();}),
+              service_ptrs_.end());
+            if (service_ptrs_.size() >= 20) {
+              std::fprintf(stderr, "[RCLCPP_SHUTDOWN_PROBE] add_service snapshot group=%p incoming=%p name=%s count=%zu\n", static_cast<void *>(this), static_cast<void *>(service_ptr.get()), service_ptr->get_service_name(), service_ptrs_.size());
+              for (size_t index = 0; index < service_ptrs_.size(); ++index) {
+                auto retained_service = service_ptrs_[index].lock();
+                std::fprintf(stderr, "[RCLCPP_SHUTDOWN_PROBE] add_service slot group=%p index=%zu service=%p name=%s\n", static_cast<void *>(this), index, static_cast<void *>(retained_service.get()), retained_service ? retained_service->get_service_name() : "<expired>");
+              }
+              std::fflush(stderr);
+            }
+          }
+          """
           replace_once(callback, add_service_old, add_service_new, "CallbackGroup add_service registration snapshot")
           replace_once(callback, "  if (notify_guard_condition_) {\n    notify_guard_condition_->trigger();\n  }\n", "  if (notify_guard_condition_) {\n    std::fprintf(stderr, \"[RCLCPP_SHUTDOWN_PROBE] CallbackGroup trigger begin this=%p gc=%p\\n\", this, notify_guard_condition_.get());\n    notify_guard_condition_->trigger();\n    std::fprintf(stderr, \"[RCLCPP_SHUTDOWN_PROBE] CallbackGroup trigger end this=%p\\n\", this);\n  } else {\n    std::fprintf(stderr, \"[RCLCPP_SHUTDOWN_PROBE] CallbackGroup has no notify guard condition this=%p\\n\", this);\n  }\n", "CallbackGroup guard trigger")
 
