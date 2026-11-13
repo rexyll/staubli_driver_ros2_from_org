@@ -365,12 +365,12 @@ jobs:
           path = Path("/tmp/staubli_ws/src/staubli_driver_ros2/staubli_moveit_config/test/test_moveit_mock_planning.launch.py")
           source = path.read_text()
           
-          import_anchor = "from controller_manager_msgs.srv import ListControllers\\n"
+          import_anchor = "from controller_manager_msgs.srv import ListControllers\n"
           if source.count(import_anchor) != 1:
               raise SystemExit("Expected one ListControllers import; refusing to patch.")
           source = source.replace(
               import_anchor,
-              import_anchor + "from controller_manager_msgs.srv import SwitchController\\n",
+              import_anchor + "from controller_manager_msgs.srv import SwitchController\n",
               1,
           )
           
