@@ -81,14 +81,11 @@ jobs:
           shutdown_anchor = "    rclcpp::shutdown();"
           if source.count(shutdown_anchor) != 1:
               raise SystemExit("Expected exactly one upstream rclcpp::shutdown call.")
-          source = source.replace(
-              shutdown_anchor,
-              "    RCLCPP_INFO(nh->get_logger(), \"shutdown A/B: stopping PSM scene publisher before Context shutdown\");\n"
-              "    planning_scene_monitor->stopPublishingPlanningScene();\n"
-              "    RCLCPP_INFO(nh->get_logger(), \"shutdown A/B: PSM scene publisher stopped and joined\");\n"
-              + shutdown_anchor,
-              1,
-          )
+          insertion = """    RCLCPP_INFO(nh->get_logger(), "shutdown A/B: stopping PSM scene publisher before Context shutdown");
+              planning_scene_monitor->stopPublishingPlanningScene();
+              RCLCPP_INFO(nh->get_logger(), "shutdown A/B: PSM scene publisher stopped and joined");
+          """
+          source = source.replace(shutdown_anchor, insertion + shutdown_anchor, 1)
           path.write_text(source)
           if source.count("planning_scene_monitor->stopPublishingPlanningScene();") != 1:
               raise SystemExit("PSM publisher stop patch validation failed.")
