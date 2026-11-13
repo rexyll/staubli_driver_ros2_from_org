@@ -120,70 +120,18 @@ jobs:
           path = Path("/tmp/moveit_ws/src/moveit2/moveit_ros/move_group/src/move_group.cpp")
           source = path.read_text()
 
-          def replace_once(pattern, replacement, label):
-              global source
-              updated, count = re.subn(pattern, replacement, source, count=1, flags=re.MULTILINE)
-              if count != 1:
-                  raise SystemExit(f"Expected exactly one {label} match, found {count}; refusing to patch.")
-              source = updated
-
-          replace_once(
-              r"^#include <set>\n",
-              "#include <set>\n#include <atomic>\n#include <pthread.h>\n#include <signal.h>\n#include <thread>\n",
-              "include insertion",
-          )
-
-          replace_once(
-              r"^  const auto moveit_cpp = std::make_shared<moveit_cpp::MoveItCpp>\(nh, moveit_cpp_options\);$",
-              "  auto moveit_cpp = std::make_shared<moveit_cpp::MoveItCpp>(nh, moveit_cpp_options);",
-              "mutable MoveItCpp handle",
-          )
-          replace_once(
-              r"^  const auto planning_scene_monitor = moveit_cpp->getPlanningSceneMonitorNonConst\(\);$",
-              "  auto planning_scene_monitor = moveit_cpp->getPlanningSceneMonitorNonConst();",
-              "mutable planning scene monitor handle",
-          )
-
-          replace_once(
-              r"^  rclcpp::init\(argc, argv\);$",
-              "  rclcpp::init(argc, argv);\n  {",
-              "restore default rclcpp signal handling",
-          )
-
-          replace_once(
-              r"^(    move_group::MoveGroupExe mge\(moveit_cpp, default_planning_pipeline, debug\);)$",
-              lambda match: match.group(1),
-              "remove custom signal waiter",
-          )
-
-          replace_once(
-              r"^    executor\.spin\(\);\n\s*rclcpp::shutdown\(\);$",
-              "    executor.spin();",
-              "restore default-handler executor spin",
-          )
-
-          replace_once(
-              r"^  return 0;\n}$",
-              "  RCLCPP_INFO(nh->get_logger(), \"shutdown probe before PSM reset: context_valid=%d\", "
-              "nh->get_node_base_interface()->get_context()->is_valid());\n"
-              "  planning_scene_monitor.reset();\n"
-              "  RCLCPP_INFO(nh->get_logger(), \"shutdown probe after PSM reset: context_valid=%d\", "
-              "nh->get_node_base_interface()->get_context()->is_valid());\n"
-              "  moveit_cpp.reset();\n"
-              "  RCLCPP_INFO(nh->get_logger(), \"shutdown probe after MoveItCpp reset: context_valid=%d\", "
-              "nh->get_node_base_interface()->get_context()->is_valid());\n"
-              "  nh.reset();\n"
-              "  puts(\"shutdown probe after main Node reset\");\n"
-              "  }\n  rclcpp::shutdown();\n  return 0;\n}",
-              "main scope close",
-          )
-
-          if source.count("rclcpp::shutdown();") != 1:
-              raise SystemExit("Expected exactly one final rclcpp::shutdown(); refusing to continue.")
-          if "rclcpp::SignalHandlerOptions::None" in source or "sigwait(" in source:
-              raise SystemExit("Custom signal handling unexpectedly remains in default-handler A/B.")
-
-          path.write_text(source)
+          # Baseline A/B: keep upstream Jazzy move_group.cpp byte-for-byte unchanged.
+          # Only verify the expected upstream lifecycle anchors; do not patch signal handling,
+          # executor behavior, object lifetime, or teardown order in this run.
+          if source.count("  rclcpp::init(argc, argv);") != 1:
+              raise SystemExit("Expected exactly one upstream rclcpp::init anchor.")
+          if source.count("    executor.spin();") != 1:
+              raise SystemExit("Expected exactly one upstream executor.spin anchor.")
+          if source.count("    rclcpp::shutdown();") != 1:
+              raise SystemExit("Expected exactly one upstream rclcpp::shutdown anchor.")
+          if "sigwait(" in source or "SignalHandlerOptions::None" in source:
+              raise SystemExit("Unexpected custom signal handling in upstream baseline.")
+          print("Baseline A/B: upstream Jazzy move_group.cpp retained unchanged.")
 
           if False:  # Controlled A/B: leave Jazzy TrajectoryExecutionManager teardown unmodified
             tem_path = Path(
