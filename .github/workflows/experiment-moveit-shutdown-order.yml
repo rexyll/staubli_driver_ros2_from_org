@@ -106,8 +106,40 @@ jobs:
               "rclcpp::executors::MultiThreadedExecutor executor"
           ):
               raise SystemExit("MoveGroupExe must be declared before executor for reverse destruction order.")
+          if "#include <cstdio>" not in source:
+              source = source.replace("#include <memory>\n", "#include <cstdio>\n#include <memory>\n", 1)
+          move_group_dtor = (
+              "  ~MoveGroupExe()\n"
+              "  {\n"
+              "    capabilities_.clear();\n"
+              "    context_.reset();\n"
+              "    capability_plugin_loader_.reset();\n"
+              "  }"
+          )
+          move_group_dtor_marked = (
+              "  ~MoveGroupExe()\n"
+              "  {\n"
+              "    std::fprintf(stderr, \"[LIFECYCLE] MoveGroupExe dtor BEGIN; capabilities=%zu loader=%d\\\\n\", "
+              "capabilities_.size(), capability_plugin_loader_ ? 1 : 0);\n"
+              "    std::fflush(stderr);\n"
+              "    std::fprintf(stderr, \"[LIFECYCLE] MoveGroupExe before capabilities_.clear\\\\n\");\n"
+              "    std::fflush(stderr);\n"
+              "    capabilities_.clear();\n"
+              "    std::fprintf(stderr, \"[LIFECYCLE] MoveGroupExe after capabilities_.clear\\\\n\");\n"
+              "    std::fflush(stderr);\n"
+              "    context_.reset();\n"
+              "    std::fprintf(stderr, \"[LIFECYCLE] MoveGroupExe after context_.reset\\\\n\");\n"
+              "    std::fflush(stderr);\n"
+              "    capability_plugin_loader_.reset();\n"
+              "    std::fprintf(stderr, \"[LIFECYCLE] MoveGroupExe after capability_plugin_loader_.reset\\\\n\");\n"
+              "    std::fflush(stderr);\n"
+              "  }"
+          )
+          if source.count(move_group_dtor) != 1:
+              raise SystemExit("Expected exactly one MoveGroupExe destructor; refusing to instrument.")
+          source = source.replace(move_group_dtor, move_group_dtor_marked, 1)
           path.write_text(source)
-          print("Applied plugin-lifetime A/B: executor/WaitSet will destruct before MoveGroupExe unloads capability plugins.")
+          print("Applied plugin-lifetime A/B and explicit MoveGroupExe capability/loader destructor markers.")
 
           if False:  # Controlled A/B: leave Jazzy TrajectoryExecutionManager teardown unmodified
             tem_path = Path(
