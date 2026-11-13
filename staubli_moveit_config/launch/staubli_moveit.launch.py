@@ -131,6 +131,8 @@ def generate_launch_description():
         package="moveit_ros_move_group",
         executable="move_group",
         output="screen",
+        # Optional CI-only debugger prefix; empty by default and inert in normal launches.
+        prefix=os.environ.get("STAUBLI_MOVE_GROUP_GDB_PREFIX", ""),
         parameters=[
             moveit_config.to_dict(),
             warehouse_ros_config,
