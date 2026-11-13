@@ -67,9 +67,9 @@ jobs:
           path = Path("/tmp/moveit_ws/src/moveit2/moveit_ros/move_group/src/move_group.cpp")
           source = path.read_text()
 
-          # Baseline A/B: keep upstream Jazzy move_group.cpp byte-for-byte unchanged.
-          # Only verify the expected upstream lifecycle anchors; do not patch signal handling,
-          # executor behavior, object lifetime, or teardown order in this run.
+          # Single-variable native A/B: stop and join only the PSM scene-publishing
+          # thread after executor.spin() returns, before Context shutdown and before
+          # MultiThreadedExecutor destruction. Keep all other upstream MoveIt code intact.
           if source.count("  rclcpp::init(argc, argv);") != 1:
               raise SystemExit("Expected exactly one upstream rclcpp::init anchor.")
           if source.count("    executor.spin();") != 1:
@@ -78,7 +78,22 @@ jobs:
               raise SystemExit("Expected exactly one upstream rclcpp::shutdown anchor.")
           if "sigwait(" in source or "SignalHandlerOptions::None" in source:
               raise SystemExit("Unexpected custom signal handling in upstream baseline.")
-          print("Baseline A/B: upstream Jazzy move_group.cpp retained unchanged.")
+          shutdown_anchor = "    executor.spin();\\n\\n    rclcpp::shutdown();"
+          if source.count(shutdown_anchor) != 1:
+              raise SystemExit("Expected exactly one executor.spin()/shutdown() boundary.")
+          source = source.replace(
+              shutdown_anchor,
+              "    executor.spin();\\n\\n"
+              "    RCLCPP_INFO(nh->get_logger(), \"shutdown A/B: stopping PSM scene publisher before Context shutdown\");\\n"
+              "    planning_scene_monitor->stopPublishingPlanningScene();\\n"
+              "    RCLCPP_INFO(nh->get_logger(), \"shutdown A/B: PSM scene publisher stopped and joined\");\\n"
+              "    rclcpp::shutdown();",
+              1,
+          )
+          path.write_text(source)
+          if source.count("planning_scene_monitor->stopPublishingPlanningScene();") != 1:
+              raise SystemExit("PSM publisher stop patch validation failed.")
+          print("Applied one-variable A/B: explicit PSM scene publisher stop/join before Context shutdown.")
 
           if False:  # Controlled A/B: leave Jazzy TrajectoryExecutionManager teardown unmodified
             tem_path = Path(
