@@ -386,9 +386,13 @@ jobs:
           export ASAN_OPTIONS='detect_leaks=0:abort_on_error=1:fast_unwind_on_malloc=0:strict_string_checks=1'
           echo "Preloading AddressSanitizer runtime: $ASAN_RUNTIME"
           echo "Preloading C++ runtime for ASan interceptors: $CXX_RUNTIME"
+          unset STAUBLI_MOVE_GROUP_GDB_PREFIX
           cd /tmp/staubli_ws
-          colcon test --packages-select staubli_moveit_config --event-handlers console_direct+ --return-code-on-test-failure
-          colcon test-result --verbose
+          for iteration in 1 2 3; do
+            echo "=== Strict mock planning + teardown repetition ${iteration}/3 ==="
+            colcon test --packages-select staubli_moveit_config --event-handlers console_direct+ --return-code-on-test-failure
+            colcon test-result --verbose
+          done
 
       - name: Preserve experiment logs
         if: always()
