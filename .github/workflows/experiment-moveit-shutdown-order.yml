@@ -47,8 +47,69 @@ jobs:
           missing = [str(path) for path in required if not path.is_file()]
           if missing:
               raise SystemExit(f"Expected Jazzy rclcpp sources missing: {missing}")
-          # Keep upstream Jazzy rclcpp source byte-for-byte unchanged.
-          print("rclcpp source instrumentation disabled; build unmodified Jazzy rclcpp without ASan.")
+
+          # CI-only lifecycle instrumentation. The upstream Jazzy checkout is modified
+          # only inside this temporary workflow workspace; no upstream source is pushed.
+          executor_path = root / "executor.cpp"
+          executor_source = executor_path.read_text()
+          if "#include <cstdio>" not in executor_source:
+              executor_source = executor_source.replace(
+                  "#include <cassert>\\n",
+                  "#include <cassert>\\n#include <cstdio>\\n",
+                  1,
+              )
+          executor_begin = """Executor::~Executor()
+          {
+            std::lock_guard<std::mutex> guard(mutex_);"""
+          executor_begin_marked = """Executor::~Executor()
+          {
+            std::fprintf(stderr, "[LIFECYCLE] Executor dtor body BEGIN\\n");
+            std::fflush(stderr);
+            std::lock_guard<std::mutex> guard(mutex_);"""
+          if executor_source.count(executor_begin) != 1:
+              raise SystemExit("Expected exactly one Executor destructor entry; refusing to instrument.")
+          executor_source = executor_source.replace(executor_begin, executor_begin_marked, 1)
+          executor_end = """    rcl_reset_error();
+            }
+          }
+
+          void
+          Executor::trigger_entity_recollect"""
+          executor_end_marked = """    rcl_reset_error();
+            }
+            std::fprintf(stderr, "[LIFECYCLE] Executor dtor body END; WaitSet member destruction follows\\n");
+            std::fflush(stderr);
+          }
+
+          void
+          Executor::trigger_entity_recollect"""
+          if executor_source.count(executor_end) != 1:
+              raise SystemExit("Expected exactly one Executor destructor exit; refusing to instrument.")
+          executor_source = executor_source.replace(executor_end, executor_end_marked, 1)
+          executor_path.write_text(executor_source)
+
+          storage_path = root.parent / "include" / "rclcpp" / "wait_set_policies" / "dynamic_storage.hpp"
+          storage_source = storage_path.read_text()
+          if "#include <cstdio>" not in storage_source:
+              storage_source = storage_source.replace(
+                  "#include <algorithm>\\n",
+                  "#include <algorithm>\\n#include <cstdio>\\n",
+                  1,
+              )
+          storage_dtor = "  ~DynamicStorage() = default;"
+          storage_dtor_marked = """  ~DynamicStorage()
+            {
+              std::fprintf(
+                stderr,
+                "[LIFECYCLE] DynamicStorage dtor body BEGIN; weak_waitables=%zu shared_waitables=%zu\\n",
+                waitables_.size(), shared_waitables_.size());
+              std::fflush(stderr);
+            }"""
+          if storage_source.count(storage_dtor) != 1:
+              raise SystemExit("Expected exactly one DynamicStorage destructor; refusing to instrument.")
+          storage_source = storage_source.replace(storage_dtor, storage_dtor_marked, 1)
+          storage_path.write_text(storage_source)
+          print("Applied CI-only rclcpp Executor/WaitSet lifecycle markers; upstream repository remains untouched.")
           PY
           rosdep install --from-paths /tmp/rclcpp_ws/src/rclcpp/rclcpp --ignore-src --rosdistro jazzy -y
           cd /tmp/rclcpp_ws
@@ -106,8 +167,37 @@ jobs:
               "rclcpp::executors::MultiThreadedExecutor executor"
           ):
               raise SystemExit("MoveGroupExe must be declared before executor for reverse destruction order.")
+          # Add explicit MoveGroupExe / capability / loader lifecycle markers.
+          if "#include <cstdio>" not in source:
+              source = source.replace("#include <memory>\\n", "#include <cstdio>\\n#include <memory>\\n", 1)
+          move_group_dtor = """  ~MoveGroupExe()
+            {
+              capabilities_.clear();
+              context_.reset();
+              capability_plugin_loader_.reset();
+            }"""
+          move_group_dtor_marked = """  ~MoveGroupExe()
+            {
+              std::fprintf(stderr, "[LIFECYCLE] MoveGroupExe dtor BEGIN; capabilities=%zu loader=%d\\n",
+                capabilities_.size(), capability_plugin_loader_ ? 1 : 0);
+              std::fflush(stderr);
+              std::fprintf(stderr, "[LIFECYCLE] MoveGroupExe before capabilities_.clear\\n");
+              std::fflush(stderr);
+              capabilities_.clear();
+              std::fprintf(stderr, "[LIFECYCLE] MoveGroupExe after capabilities_.clear\\n");
+              std::fflush(stderr);
+              context_.reset();
+              std::fprintf(stderr, "[LIFECYCLE] MoveGroupExe after context_.reset\\n");
+              std::fflush(stderr);
+              capability_plugin_loader_.reset();
+              std::fprintf(stderr, "[LIFECYCLE] MoveGroupExe after capability_plugin_loader_.reset\\n");
+              std::fflush(stderr);
+            }"""
+          if source.count(move_group_dtor) != 1:
+              raise SystemExit("Expected exactly one MoveGroupExe destructor; refusing to instrument.")
+          source = source.replace(move_group_dtor, move_group_dtor_marked, 1)
           path.write_text(source)
-          print("Applied plugin-lifetime A/B: executor/WaitSet will destruct before MoveGroupExe unloads capability plugins.")
+          print("Applied plugin-lifetime A/B and MoveGroupExe capability/loader lifecycle markers.")
           print("Verified C++ declaration order: MoveGroupExe is constructed before MultiThreadedExecutor; reverse destruction keeps capability DSOs loaded through WaitSet teardown.")
 
           if False:  # Controlled A/B: leave Jazzy TrajectoryExecutionManager teardown unmodified
@@ -222,6 +312,32 @@ jobs:
           git -C /tmp/moveit_ws/src/moveit2 diff -- moveit_ros/move_group/src/move_group.cpp
           git -C /tmp/moveit_ws/src/moveit2 diff -- moveit_ros/planning/trajectory_execution_manager/src/trajectory_execution_manager.cpp
           git -C /tmp/moveit_ws/src/moveit2 diff -- moveit_ros/planning/trajectory_execution_manager/include/moveit/trajectory_execution_manager/trajectory_execution_manager.hpp
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("/tmp/moveit_ws/src/moveit2/moveit_ros/planning/moveit_cpp/src/moveit_cpp.cpp")
+          source = path.read_text()
+          anchor = """MoveItCpp::~MoveItCpp()
+          {
+            RCLCPP_INFO(logger_, "Deleting MoveItCpp");
+          }"""
+          replacement = """MoveItCpp::~MoveItCpp()
+          {
+            std::fprintf(stderr, "[LIFECYCLE] MoveItCpp dtor BEGIN\\n");
+            std::fflush(stderr);
+            RCLCPP_INFO(logger_, "Deleting MoveItCpp");
+            std::fprintf(stderr, "[LIFECYCLE] MoveItCpp dtor END\\n");
+            std::fflush(stderr);
+          }"""
+          if source.count(anchor) != 1:
+              raise SystemExit("Expected exactly one MoveItCpp destructor; refusing to instrument.")
+          if "#include <cstdio>" not in source:
+              source = source.replace("#include <memory>\\n", "#include <cstdio>\\n#include <memory>\\n", 1)
+          source = source.replace(anchor, replacement, 1)
+          path.write_text(source)
+          PY
+          git -C /tmp/moveit_ws/src/moveit2 diff --check
+          git -C /tmp/moveit_ws/src/moveit2 diff -- moveit_ros/move_group/src/move_group.cpp moveit_ros/planning/moveit_cpp/src/moveit_cpp.cpp
 
       - name: Install MoveIt source dependencies
         shell: bash
