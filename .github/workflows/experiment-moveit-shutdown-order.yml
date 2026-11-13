@@ -307,7 +307,7 @@ jobs:
           source /tmp/staubli_ws/install/setup.bash
           unset LD_PRELOAD ASAN_OPTIONS
           echo "Running native non-ASan strict mock planning + teardown regression."
-          export STAUBLI_MOVE_GROUP_GDB_PREFIX='gdb -q -batch -return-child-result -ex "set pagination off" -ex "handle SIGINT nostop noprint pass" -ex run -ex "bt full" -ex "info registers" -ex "thread apply all bt 30" --args'
+          export STAUBLI_MOVE_GROUP_GDB_PREFIX='gdb -q -batch -return-child-result -ex "set pagination off" -ex "handle SIGINT nostop noprint pass" -ex run -ex "bt full" -ex "frame 15" -ex "p executor.wait_set_.waitables_" -ex "p executor.wait_set_.shared_waitables_" -ex "info registers" -ex "thread apply all bt 30" --args'
           cd /tmp/staubli_ws
           for iteration in 1; do
             echo "=== Strict mock planning + teardown repetition ${iteration}/3 ==="
