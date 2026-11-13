@@ -47,8 +47,55 @@ jobs:
           missing = [str(path) for path in required if not path.is_file()]
           if missing:
               raise SystemExit(f"Expected Jazzy rclcpp sources missing: {missing}")
-          # Keep upstream Jazzy rclcpp source byte-for-byte unchanged.
-          print("rclcpp source instrumentation disabled; build unmodified Jazzy rclcpp without ASan.")
+          # Add CI-only lifecycle markers to the temporary rclcpp overlay.
+          executor_path = root / "executor.cpp"
+          executor_source = executor_path.read_text()
+          if "#include <cstdio>" not in executor_source:
+              executor_source = executor_source.replace(
+                  "#include <cassert>\n",
+                  "#include <cassert>\n#include <cstdio>\n",
+                  1,
+              )
+          executor_begin = (
+              "Executor::~Executor()\n"
+              "{\n"
+              "  std::lock_guard<std::mutex> guard(mutex_);"
+          )
+          executor_begin_marked = (
+              "Executor::~Executor()\n"
+              "{\n"
+              "  std::fprintf(stderr, \"[LIFECYCLE] Executor dtor body BEGIN\\n\");\n"
+              "  std::fflush(stderr);\n"
+              "  std::lock_guard<std::mutex> guard(mutex_);"
+          )
+          if executor_source.count(executor_begin) != 1:
+              raise SystemExit("Expected exactly one Executor destructor entry; refusing to instrument.")
+          executor_source = executor_source.replace(executor_begin, executor_begin_marked, 1)
+          executor_end = (
+              "  if (!context_->remove_on_shutdown_callback(shutdown_callback_handle_)) {\n"
+              "    RCUTILS_LOG_ERROR_NAMED(\n"
+              "      \"rclcpp\",\n"
+              "      \"failed to remove registered on_shutdown callback\");\n"
+              "    rcl_reset_error();\n"
+              "  }\n"
+              "}"
+          )
+          executor_end_marked = (
+              "  if (!context_->remove_on_shutdown_callback(shutdown_callback_handle_)) {\n"
+              "    RCUTILS_LOG_ERROR_NAMED(\n"
+              "      \"rclcpp\",\n"
+              "      \"failed to remove registered on_shutdown callback\");\n"
+              "    rcl_reset_error();\n"
+              "  }\n"
+              "  std::fprintf(stderr, \"[LIFECYCLE] Executor dtor body END; WaitSet member destruction follows\\n\");\n"
+              "  std::fflush(stderr);\n"
+              "}"
+          )
+          if executor_source.count(executor_end) != 1:
+              raise SystemExit("Expected exactly one Executor destructor exit; refusing to instrument.")
+          executor_source = executor_source.replace(executor_end, executor_end_marked, 1)
+          executor_path.write_text(executor_source)
+          print("Applied CI-only Executor destructor entry/exit markers; upstream repository remains untouched.")
           PY
           rosdep install --from-paths /tmp/rclcpp_ws/src/rclcpp/rclcpp --ignore-src --rosdistro jazzy -y
           cd /tmp/rclcpp_ws
