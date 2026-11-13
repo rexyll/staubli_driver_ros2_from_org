@@ -379,7 +379,7 @@ jobs:
           source /tmp/moveit_ws/install/setup.bash
           source /tmp/staubli_ws/install/setup.bash
           export ASAN_RUNTIME="$(gcc -print-file-name=libasan.so)"
-          export CXX_RUNTIME="$(ldconfig -p | awk '/libstdc\\+\\+\\.so\\.6 \\(/{print $NF; exit}')"
+          export CXX_RUNTIME="$(ldconfig -p | awk '$1 == "libstdc++.so.6" {print $NF; exit}')"
           test -f "$ASAN_RUNTIME"
           test -f "$CXX_RUNTIME"
           export LD_PRELOAD="$ASAN_RUNTIME:$CXX_RUNTIME${LD_PRELOAD:+:$LD_PRELOAD}"
