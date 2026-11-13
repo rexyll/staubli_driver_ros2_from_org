@@ -379,10 +379,13 @@ jobs:
           source /tmp/moveit_ws/install/setup.bash
           source /tmp/staubli_ws/install/setup.bash
           export ASAN_RUNTIME="$(gcc -print-file-name=libasan.so)"
+          export CXX_RUNTIME="$(ldconfig -p | awk '/libstdc\\+\\+\\.so\\.6 \\(/{print $NF; exit}')"
           test -f "$ASAN_RUNTIME"
-          export LD_PRELOAD="$ASAN_RUNTIME${LD_PRELOAD:+:$LD_PRELOAD}"
+          test -f "$CXX_RUNTIME"
+          export LD_PRELOAD="$ASAN_RUNTIME:$CXX_RUNTIME${LD_PRELOAD:+:$LD_PRELOAD}"
           export ASAN_OPTIONS='detect_leaks=0:abort_on_error=1:fast_unwind_on_malloc=0:strict_string_checks=1'
           echo "Preloading AddressSanitizer runtime: $ASAN_RUNTIME"
+          echo "Preloading C++ runtime for ASan interceptors: $CXX_RUNTIME"
           cd /tmp/staubli_ws
           colcon test --packages-select staubli_moveit_config --event-handlers console_direct+ --return-code-on-test-failure
           colcon test-result --verbose
