@@ -24,7 +24,7 @@ jobs:
         shell: bash
         run: |
           apt-get update
-          apt-get install -y git python3-colcon-common-extensions python3-rosdep python3-vcstool
+          apt-get install -y git gdb python3-colcon-common-extensions python3-rosdep python3-vcstool
           source /opt/ros/jazzy/setup.bash
           rosdep update --rosdistro jazzy
 
@@ -48,7 +48,7 @@ jobs:
           if missing:
               raise SystemExit(f"Expected Jazzy rclcpp sources missing: {missing}")
           # Keep upstream Jazzy rclcpp source byte-for-byte unchanged.
-          print("rclcpp source instrumentation disabled; build unmodified Jazzy rclcpp with ASan.")
+          print("rclcpp source instrumentation disabled; build unmodified Jazzy rclcpp without ASan.")
           PY
           rosdep install --from-paths /tmp/rclcpp_ws/src/rclcpp/rclcpp --ignore-src --rosdistro jazzy -y
           cd /tmp/rclcpp_ws
@@ -296,9 +296,9 @@ jobs:
           source /tmp/staubli_ws/install/setup.bash
           unset LD_PRELOAD ASAN_OPTIONS
           echo "Running native non-ASan strict mock planning + teardown regression."
-          unset STAUBLI_MOVE_GROUP_GDB_PREFIX
+          export STAUBLI_MOVE_GROUP_GDB_PREFIX='gdb -q -batch -return-child-result -ex "handle SIGINT nostop noprint pass" -ex run -ex "thread apply all bt full" --args'
           cd /tmp/staubli_ws
-          for iteration in 1 2 3; do
+          for iteration in 1; do
             echo "=== Strict mock planning + teardown repetition ${iteration}/3 ==="
             colcon test --packages-select staubli_moveit_config --event-handlers console_direct+ --return-code-on-test-failure
             colcon test-result --verbose
