@@ -95,10 +95,10 @@ jobs:
           # plugin instances and their plugin DSOs are still alive.
           declaration_order = """    rclcpp::executors::MultiThreadedExecutor executor;
 
-              move_group::MoveGroupExe mge(moveit_cpp, default_planning_pipeline, debug);"""
+    move_group::MoveGroupExe mge(moveit_cpp, default_planning_pipeline, debug);"""
           reordered_declarations = """    move_group::MoveGroupExe mge(moveit_cpp, default_planning_pipeline, debug);
 
-              rclcpp::executors::MultiThreadedExecutor executor;"""
+    rclcpp::executors::MultiThreadedExecutor executor;"""
           if source.count(declaration_order) != 1:
               raise SystemExit("Expected exactly one executor/MoveGroupExe declaration pair; refusing to reorder.")
           source = source.replace(declaration_order, reordered_declarations, 1)
