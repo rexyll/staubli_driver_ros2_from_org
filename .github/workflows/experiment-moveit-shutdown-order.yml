@@ -75,10 +75,10 @@ jobs:
       [](rclcpp::ServiceBase::WeakPtr x) {return x.expired();}),
     service_ptrs_.end());
   if (service_ptrs_.size() >= 20) {
-    std::fprintf(stderr, "[RCLCPP_SHUTDOWN_PROBE] add_service snapshot group=%p incoming=%p name=%s count=%zu\\n", static_cast<void *>(this), static_cast<void *>(service_ptr.get()), service_ptr->get_service_name(), service_ptrs_.size());
+    std::fprintf(stderr, "[RCLCPP_SHUTDOWN_PROBE] add_service snapshot group=%p incoming=%p name=%s count=%zu\n", static_cast<void *>(this), static_cast<void *>(service_ptr.get()), service_ptr->get_service_name(), service_ptrs_.size());
     for (size_t index = 0; index < service_ptrs_.size(); ++index) {
       auto retained_service = service_ptrs_[index].lock();
-      std::fprintf(stderr, "[RCLCPP_SHUTDOWN_PROBE] add_service slot group=%p index=%zu service=%p name=%s\\n", static_cast<void *>(this), index, static_cast<void *>(retained_service.get()), retained_service ? retained_service->get_service_name() : "<expired>");
+      std::fprintf(stderr, "[RCLCPP_SHUTDOWN_PROBE] add_service slot group=%p index=%zu service=%p name=%s\n", static_cast<void *>(this), index, static_cast<void *>(retained_service.get()), retained_service ? retained_service->get_service_name() : "<expired>");
     }
     std::fflush(stderr);
   }
