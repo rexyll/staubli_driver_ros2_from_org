@@ -83,9 +83,9 @@ jobs:
               raise SystemExit("Expected exactly one upstream rclcpp::shutdown call.")
           source = source.replace(
               shutdown_anchor,
-              "    RCLCPP_INFO(nh->get_logger(), \"shutdown A/B: stopping PSM scene publisher before Context shutdown\");\\n"
-              "    planning_scene_monitor->stopPublishingPlanningScene();\\n"
-              "    RCLCPP_INFO(nh->get_logger(), \"shutdown A/B: PSM scene publisher stopped and joined\");\\n"
+              "    RCLCPP_INFO(nh->get_logger(), \"shutdown A/B: stopping PSM scene publisher before Context shutdown\");\n"
+              "    planning_scene_monitor->stopPublishingPlanningScene();\n"
+              "    RCLCPP_INFO(nh->get_logger(), \"shutdown A/B: PSM scene publisher stopped and joined\");\n"
               + shutdown_anchor,
               1,
           )
