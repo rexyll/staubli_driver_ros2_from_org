@@ -355,9 +355,9 @@ jobs:
           mkdir -p /tmp/staubli_ws/src
           git init /tmp/staubli_ws/src/staubli_driver_ros2
           git -C /tmp/staubli_ws/src/staubli_driver_ros2 remote add origin https://github.com/rexyll/staubli_driver_ros2_from_org.git
-          git -C /tmp/staubli_ws/src/staubli_driver_ros2 fetch --depth 1 origin c74a70f76c642ee99809efc3bcd01740ba90e89d
+          git -C /tmp/staubli_ws/src/staubli_driver_ros2 fetch --depth 1 origin 7d9fa0d715db46060199eeca541514ddeed9c4c1
           git -C /tmp/staubli_ws/src/staubli_driver_ros2 checkout --detach FETCH_HEAD
-          test "$(git -C /tmp/staubli_ws/src/staubli_driver_ros2 rev-parse HEAD)" = "c74a70f76c642ee99809efc3bcd01740ba90e89d"
+          test "$(git -C /tmp/staubli_ws/src/staubli_driver_ros2 rev-parse HEAD)" = "7d9fa0d715db46060199eeca541514ddeed9c4c1"
           python3 - <<'PY'
           from pathlib import Path
           
