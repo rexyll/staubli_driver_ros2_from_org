@@ -176,6 +176,22 @@ jobs:
           source = source.replace(anchor, replacement, 1)
           path.write_text(source)
           print("Patched PAL Statistics idle wait to poll with std::this_thread and exit on invalid ROS context.")
+
+          # GCC 13 rejects std::swap on vector<bool>::reference proxies.
+          # Preserve the exact swap semantics with an ordinary bool temporary.
+          registration_path = Path("/tmp/moveit_ws/src/pal_statistics/pal_statistics/src/registration_list.cpp")
+          registration_source = registration_path.read_text()
+          swap_anchor = "  std::swap(enabled_[index], enabled_.back());"
+          swap_replacement = (
+              "  const bool enabled_value = enabled_[index];\\n"
+              "  enabled_[index] = enabled_.back();\\n"
+              "  enabled_.back() = enabled_value;"
+          )
+          if registration_source.count(swap_anchor) != 1:
+              raise SystemExit("Expected exactly one vector<bool> swap anchor; refusing compatibility patch.")
+          registration_source = registration_source.replace(swap_anchor, swap_replacement, 1)
+          registration_path.write_text(registration_source)
+          print("Applied semantics-preserving GCC 13 vector<bool> swap compatibility patch.")
           PY
           python3 - <<'PY'
           from pathlib import Path
