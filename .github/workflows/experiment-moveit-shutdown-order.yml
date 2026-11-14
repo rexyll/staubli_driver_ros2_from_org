@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - "experiment/move-group-shutdown-order"
+      - "experiment/move-group-shutdown-order-recheck-20261114"
 
 permissions:
   contents: read
@@ -431,6 +432,8 @@ jobs:
           source /tmp/staubli_ws/install/setup.bash
           unset LD_PRELOAD ASAN_OPTIONS
           echo "Running native non-ASan strict mock planning + teardown regression."
+          echo "Independent fresh-run validation branch: experiment/move-group-shutdown-order-recheck-20261114"
+          echo "Stäubli workspace snapshot: 7d9fa0d715db46060199eeca541514ddeed9c4c1; retained baseline ancestor: 9e617a9e323ef3342f5151a89239bfd93c089f8c."
           export STAUBLI_MOVE_GROUP_GDB_PREFIX='gdb -q -batch -return-child-result -ex "set pagination off" -ex "disable pretty-printer" -ex "set print pretty off" -ex "set print elements 0" -ex "handle SIGINT nostop noprint pass" -ex "set environment LD_DEBUG files" -ex run -ex "bt full" -ex "frame 0" -ex "info args" -ex "p/x this" -ex "x/8gx this" -ex "p/x *(void**)this" -ex "info proc mappings" -ex "x/16i $pc-32" -ex "info registers" -ex "thread apply all bt 40" --args'
           cd /tmp/staubli_ws
           failures=0
