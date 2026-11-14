@@ -188,7 +188,7 @@ jobs:
           path.write_text(source)
           print("Applied plugin-lifetime A/B and explicit MoveGroupExe capability/loader destructor markers.")
 
-          if False:  # Controlled A/B: leave Jazzy TrajectoryExecutionManager teardown unmodified
+          if True:  # Controlled A/B: release TEM callbacks, executor, controller manager and node before plugin-loader teardown
             tem_path = Path(
                 "/tmp/moveit_ws/src/moveit2/moveit_ros/planning/trajectory_execution_manager/src/"
                 "trajectory_execution_manager.cpp"
@@ -292,7 +292,7 @@ jobs:
                 raise SystemExit("Internal controller-manager teardown order validation failed.")
             tem_path.write_text(tem_source)
 
-          print("A/B mode: TrajectoryExecutionManager source is left unmodified; only move_group signal-wait/deferred Context shutdown is patched.")
+          print("A/B mode: explicitly tear down TEM-owned callbacks, executor, controller manager and controller node while controller_manager_loader_ remains alive.")
           print("Applied structured MoveIt Jazzy signal-wait patch.")
           print("Validated unique include/init/executor/spin/main anchors and deferred context shutdown.")
           PY
