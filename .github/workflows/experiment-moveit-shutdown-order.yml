@@ -119,15 +119,15 @@ jobs:
           path = Path("/tmp/moveit_ws/src/pal_statistics/pal_statistics/src/pal_statistics.cpp")
           source = path.read_text()
           if "#include <chrono>" not in source:
-              source = source.replace("#include <memory>\\n", "#include <chrono>\\n#include <memory>\\n", 1)
+              source = source.replace("#include <memory>\n", "#include <chrono>\n#include <memory>\n", 1)
           if "#include <thread>" not in source:
-              source = source.replace("#include <string>\\n", "#include <string>\\n#include <thread>\\n", 1)
+              source = source.replace("#include <string>\n", "#include <string>\n#include <thread>\n", 1)
           rate_anchor = "  rclcpp::WallRate rate(2000);"
           if source.count(rate_anchor) != 1:
               raise SystemExit("Expected one PAL Statistics 2 kHz WallRate anchor; refusing to patch.")
           source = source.replace(
               rate_anchor,
-              "  // Preserve 2 kHz polling without sleeping on a ROS context that may shut down.\\n"
+              "  // Preserve 2 kHz polling without sleeping on a ROS context that may shut down.\n"
               "  constexpr auto poll_period = std::chrono::microseconds(500);",
               1,
           )
