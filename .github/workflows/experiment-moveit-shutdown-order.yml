@@ -110,88 +110,45 @@ jobs:
           # Pin PAL Statistics source so its publisher-thread shutdown path can be tested in isolation.
           git init /tmp/moveit_ws/src/pal_statistics
           git -C /tmp/moveit_ws/src/pal_statistics remote add origin https://github.com/pal-robotics/pal_statistics.git
-          git -C /tmp/moveit_ws/src/pal_statistics fetch --depth 1 origin d455ae2398b1565ff9ee681e8da63efbe76cf7aa
+          git -C /tmp/moveit_ws/src/pal_statistics fetch --depth 1 origin fb01203897860844c038663b813a7ca7de7ba520
           git -C /tmp/moveit_ws/src/pal_statistics checkout --detach FETCH_HEAD
-          test "$(git -C /tmp/moveit_ws/src/pal_statistics rev-parse HEAD)" = "d455ae2398b1565ff9ee681e8da63efbe76cf7aa"
+          test "$(git -C /tmp/moveit_ws/src/pal_statistics rev-parse HEAD)" = "fb01203897860844c038663b813a7ca7de7ba520"
           python3 - <<'PY'
           from pathlib import Path
 
           path = Path("/tmp/moveit_ws/src/pal_statistics/pal_statistics/src/pal_statistics.cpp")
           source = path.read_text()
           if "#include <chrono>" not in source:
-              source = source.replace("#include <memory>\n", "#include <chrono>\n#include <memory>\n", 1)
+              source = source.replace("#include <memory>\\n", "#include <chrono>\\n#include <memory>\\n", 1)
           if "#include <thread>" not in source:
-              source = source.replace("#include <string>\n", "#include <string>\n#include <thread>\n", 1)
-          anchor = """void StatisticsRegistry::publisherThreadCycle()
-          {
-            rclcpp::WallRate rate(2000);
-            while (rclcpp::ok() && !interrupt_thread_) {
-              while (!is_data_ready_ && !interrupt_thread_) {
+              source = source.replace("#include <string>\\n", "#include <string>\\n#include <thread>\\n", 1)
+          rate_anchor = "  rclcpp::WallRate rate(2000);"
+          if source.count(rate_anchor) != 1:
+              raise SystemExit("Expected one PAL Statistics 2 kHz WallRate anchor; refusing to patch.")
+          source = source.replace(
+              rate_anchor,
+              "  // Preserve 2 kHz polling without sleeping on a ROS context that may shut down.\\n"
+              "  constexpr auto poll_period = std::chrono::microseconds(500);",
+              1,
+          )
+          wait_anchor = """      while (!is_data_ready_ && !interrupt_thread_) {
                 rate.sleep();
               }
 
-              std::unique_lock<std::mutex> data_lock(data_mutex_);
-
-              while (registration_list_->hasPendingData()) {
-                bool minor_changes = updateMsg(names_msg_, values_msg_, true);
-
-                std::unique_lock<std::mutex> pub_lock(pub_mutex_);
-                data_lock.unlock();
-                doPublish(!minor_changes);
-                pub_lock.unlock();
-                data_lock.lock();
-              }
-              is_data_ready_ = false;
-            }
-          }
-          """
-          replacement = """void StatisticsRegistry::publisherThreadCycle()
-          {
-            // Keep the polling cadence at 2 kHz without sleeping through the ROS
-            // context. WallRate::sleep() can throw after shutdown invalidates it.
-            constexpr auto poll_period = std::chrono::microseconds(500);
-            while (rclcpp::ok() && !interrupt_thread_) {
-              while (!is_data_ready_ && !interrupt_thread_ && rclcpp::ok()) {
+              std::unique_lock<std::mutex> data_lock(data_mutex_);"""
+          wait_replacement = """      while (!is_data_ready_ && !interrupt_thread_ && rclcpp::ok()) {
                 std::this_thread::sleep_for(poll_period);
               }
               if (!rclcpp::ok() || interrupt_thread_) {
                 break;
               }
 
-              std::unique_lock<std::mutex> data_lock(data_mutex_);
-              while (registration_list_->hasPendingData()) {
-                bool minor_changes = updateMsg(names_msg_, values_msg_, true);
-                std::unique_lock<std::mutex> pub_lock(pub_mutex_);
-                data_lock.unlock();
-                doPublish(!minor_changes);
-                pub_lock.unlock();
-                data_lock.lock();
-              }
-              is_data_ready_ = false;
-            }
-          }
-          """
-          if source.count(anchor) != 1:
-              raise SystemExit("Expected exactly one publisherThreadCycle anchor; refusing to patch.")
-          source = source.replace(anchor, replacement, 1)
+              std::unique_lock<std::mutex> data_lock(data_mutex_);"""
+          if source.count(wait_anchor) != 1:
+              raise SystemExit("Expected one PAL Statistics publisher wait anchor; refusing to patch.")
+          source = source.replace(wait_anchor, wait_replacement, 1)
           path.write_text(source)
-          print("Patched PAL Statistics idle wait to poll with std::this_thread and exit on invalid ROS context.")
-
-          # GCC 13 rejects std::swap on vector<bool>::reference proxies.
-          # Preserve the exact swap semantics with an ordinary bool temporary.
-          registration_path = Path("/tmp/moveit_ws/src/pal_statistics/pal_statistics/src/registration_list.cpp")
-          registration_source = registration_path.read_text()
-          swap_anchor = "  std::swap(enabled_[index], enabled_.back());"
-          swap_replacement = (
-              "  const bool enabled_value = enabled_[index];\n"
-              "  enabled_[index] = enabled_.back();\n"
-              "  enabled_.back() = enabled_value;"
-          )
-          if registration_source.count(swap_anchor) != 1:
-              raise SystemExit("Expected exactly one vector<bool> swap anchor; refusing compatibility patch.")
-          registration_source = registration_source.replace(swap_anchor, swap_replacement, 1)
-          registration_path.write_text(registration_source)
-          print("Applied semantics-preserving GCC 13 vector<bool> swap compatibility patch.")
+          print("Patched ABI-compatible PAL Statistics publisher wait to exit on invalid ROS context.")
           PY
           python3 - <<'PY'
           from pathlib import Path
