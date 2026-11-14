@@ -3,7 +3,7 @@ name: MoveIt shutdown-order experiment
 on:
   push:
     branches:
-      - "experiment/move-group-shutdown-order"
+      - "experiment/**"
 
 permissions:
   contents: read
@@ -114,27 +114,8 @@ jobs:
           path = Path("/tmp/moveit_ws/src/moveit2/moveit_ros/move_group/src/move_group.cpp")
           source = path.read_text()
 
-          # Single-variable native A/B: stop and join only the PSM scene-publishing
-          # thread after executor.spin() returns, before Context shutdown and before
-          # MultiThreadedExecutor destruction. Keep all other upstream MoveIt code intact.
-          if source.count("  rclcpp::init(argc, argv);") != 1:
-              raise SystemExit("Expected exactly one upstream rclcpp::init anchor.")
-          if source.count("    executor.spin();") != 1:
-              raise SystemExit("Expected exactly one upstream executor.spin anchor.")
-          if source.count("    rclcpp::shutdown();") != 1:
-              raise SystemExit("Expected exactly one upstream rclcpp::shutdown anchor.")
-          if "sigwait(" in source or "SignalHandlerOptions::None" in source:
-              raise SystemExit("Unexpected custom signal handling in upstream baseline.")
-          shutdown_anchor = "    rclcpp::shutdown();"
-          if source.count(shutdown_anchor) != 1:
-              raise SystemExit("Expected exactly one upstream rclcpp::shutdown call.")
-          insertion = """    RCLCPP_INFO(nh->get_logger(), "shutdown A/B: stopping PSM scene publisher before Context shutdown");
-              planning_scene_monitor->stopPublishingPlanningScene();
-              RCLCPP_INFO(nh->get_logger(), "shutdown A/B: PSM scene publisher stopped and joined");
-          """
-          source = source.replace(shutdown_anchor, insertion + shutdown_anchor, 1)
-          if source.count("planning_scene_monitor->stopPublishingScene();") != 0:
-              raise SystemExit("Unexpected alternate PSM shutdown anchor.")
+          # Ablation: deliberately omit PSM scene-publisher stop/join.
+          # All other teardown fixes remain unchanged to test whether this factor is required.
           # Keep the main node and MoveItCpp alive only until MoveGroupExe clears
           # capability instances; then destroy them before its plugin loader unloads
           # capability DSOs. The previous run proved nh survived past loader reset.
@@ -160,9 +141,7 @@ jobs:
               < source.index("nh.reset();")
           ):
               raise SystemExit("Main node owner reset order validation failed.")
-          if source.count("planning_scene_monitor->stopPublishingPlanningScene();") != 1:
-              raise SystemExit("PSM publisher stop patch validation failed.")
-          print("Applied PSM publisher stop and deferred main node-owner release until MoveGroupExe plugin teardown.")
+          print("Ablation: omitted PSM publisher stop; retained main-node owner release and plugin-loader ordering.")
 
           # Targeted plugin-lifetime A/B: declare MoveGroupExe before the executor,
           # so reverse destruction destroys the executor WaitSet while capability
