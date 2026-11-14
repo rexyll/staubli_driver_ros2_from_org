@@ -356,9 +356,18 @@ jobs:
           mkdir -p /tmp/staubli_ws/src
           git init /tmp/staubli_ws/src/staubli_driver_ros2
           git -C /tmp/staubli_ws/src/staubli_driver_ros2 remote add origin https://github.com/rexyll/staubli_driver_ros2_from_org.git
-          git -C /tmp/staubli_ws/src/staubli_driver_ros2 fetch --depth 1 origin 7d9fa0d715db46060199eeca541514ddeed9c4c1
-          git -C /tmp/staubli_ws/src/staubli_driver_ros2 checkout --detach FETCH_HEAD
-          test "$(git -C /tmp/staubli_ws/src/staubli_driver_ros2 rev-parse HEAD)" = "7d9fa0d715db46060199eeca541514ddeed9c4c1"
+          STAUBLI_BASE_SHA="9e617a9e323ef3342f5151a89239bfd93c089f8c"
+          STAUBLI_WORKTREE_SHA="7d9fa0d715db46060199eeca541514ddeed9c4c1"
+          git -C /tmp/staubli_ws/src/staubli_driver_ros2 fetch --depth 1 origin "${STAUBLI_BASE_SHA}"
+          git -C /tmp/staubli_ws/src/staubli_driver_ros2 fetch --depth 1 origin "${STAUBLI_WORKTREE_SHA}"
+          git -C /tmp/staubli_ws/src/staubli_driver_ros2 checkout --detach "${STAUBLI_BASE_SHA}"
+          git -C /tmp/staubli_ws/src/staubli_driver_ros2 diff --binary "${STAUBLI_BASE_SHA}" "${STAUBLI_WORKTREE_SHA}" > /tmp/staubli-source-overlay.patch
+          git -C /tmp/staubli_ws/src/staubli_driver_ros2 apply --check /tmp/staubli-source-overlay.patch
+          git -C /tmp/staubli_ws/src/staubli_driver_ros2 apply /tmp/staubli-source-overlay.patch
+          git -C /tmp/staubli_ws/src/staubli_driver_ros2 diff --check
+          test "$(git -C /tmp/staubli_ws/src/staubli_driver_ros2 rev-parse HEAD)" = "${STAUBLI_BASE_SHA}"
+          git -C /tmp/staubli_ws/src/staubli_driver_ros2 diff --exit-code "${STAUBLI_WORKTREE_SHA}" -- .
+          echo "Checked out exact Stäubli baseline ${STAUBLI_BASE_SHA}; verified overlay reproduces ${STAUBLI_WORKTREE_SHA} tree."
           python3 - <<'PY'
           from pathlib import Path
           
@@ -437,7 +446,7 @@ jobs:
           unset LD_PRELOAD ASAN_OPTIONS
           echo "Running native non-ASan strict mock planning + teardown regression."
           echo "Independent fresh-run validation branch: experiment/move-group-shutdown-order-recheck-20261114"
-          echo "Stäubli workspace snapshot: 7d9fa0d715db46060199eeca541514ddeed9c4c1; retained baseline ancestor: 9e617a9e323ef3342f5151a89239bfd93c089f8c."
+          echo "Stäubli source pin: exact checkout 9e617a9e323ef3342f5151a89239bfd93c089f8c; local workspace overlay verified identical to 7d9fa0d715db46060199eeca541514ddeed9c4c1."
           export STAUBLI_MOVE_GROUP_GDB_PREFIX='gdb -q -batch -return-child-result -ex "set pagination off" -ex "disable pretty-printer" -ex "set print pretty off" -ex "set print elements 0" -ex "handle SIGINT nostop noprint pass" -ex "set environment LD_DEBUG files" -ex run -ex "bt full" -ex "frame 0" -ex "info args" -ex "p/x this" -ex "x/8gx this" -ex "p/x *(void**)this" -ex "info proc mappings" -ex "x/16i $pc-32" -ex "info registers" -ex "thread apply all bt 40" --args'
           cd /tmp/staubli_ws
           failures=0
