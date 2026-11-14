@@ -119,9 +119,9 @@ jobs:
           path = Path("/tmp/moveit_ws/src/pal_statistics/pal_statistics/src/pal_statistics.cpp")
           source = path.read_text()
           if "#include <chrono>" not in source:
-              source = source.replace("#include <memory>\\n", "#include <chrono>\\n#include <memory>\\n", 1)
+              source = source.replace("#include <memory>\n", "#include <chrono>\n#include <memory>\n", 1)
           if "#include <thread>" not in source:
-              source = source.replace("#include <string>\\n", "#include <string>\\n#include <thread>\\n", 1)
+              source = source.replace("#include <string>\n", "#include <string>\n#include <thread>\n", 1)
           anchor = """void StatisticsRegistry::publisherThreadCycle()
           {
             rclcpp::WallRate rate(2000);
