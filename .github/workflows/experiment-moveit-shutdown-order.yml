@@ -183,8 +183,8 @@ jobs:
           registration_source = registration_path.read_text()
           swap_anchor = "  std::swap(enabled_[index], enabled_.back());"
           swap_replacement = (
-              "  const bool enabled_value = enabled_[index];\\n"
-              "  enabled_[index] = enabled_.back();\\n"
+              "  const bool enabled_value = enabled_[index];\n"
+              "  enabled_[index] = enabled_.back();\n"
               "  enabled_.back() = enabled_value;"
           )
           if registration_source.count(swap_anchor) != 1:
