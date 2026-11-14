@@ -384,7 +384,7 @@ jobs:
           set -eo pipefail
           source /opt/ros/jazzy/setup.bash
           source /tmp/rclcpp_ws/install/setup.bash
-          rosdep install --from-paths /tmp/moveit_ws/src --ignore-src --skip-keys "message_generation rostest rospy" --rosdistro jazzy -y
+          rosdep install --from-paths /tmp/moveit_ws/src --ignore-src --skip-keys "message_generation rostest rospy catkin" --rosdistro jazzy -y
           cd /tmp/moveit_ws
           colcon build --packages-select pal_statistics --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_FLAGS='-O1 -g -fno-omit-frame-pointer' -DBUILD_TESTING=OFF
 
