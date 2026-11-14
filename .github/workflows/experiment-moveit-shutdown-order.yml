@@ -127,6 +127,7 @@ jobs:
               raise SystemExit("Expected unique main MoveItCpp/PSM owner declarations.")
           source = source.replace(moveit_cpp_anchor, moveit_cpp_replacement, 1)
           source = source.replace(psm_anchor, psm_replacement, 1)
+          shutdown_anchor = "    rclcpp::shutdown();"
           shutdown_reset = """    rclcpp::shutdown();
               planning_scene_monitor.reset();
               moveit_cpp.reset();
