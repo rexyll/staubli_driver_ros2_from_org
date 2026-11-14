@@ -132,18 +132,18 @@ jobs:
               1,
           )
           wait_anchor = """      while (!is_data_ready_ && !interrupt_thread_) {
-                rate.sleep();
-              }
+        rate.sleep();
+      }
 
-              std::unique_lock<std::mutex> data_lock(data_mutex_);"""
+      std::unique_lock<std::mutex> data_lock(data_mutex_);"""
           wait_replacement = """      while (!is_data_ready_ && !interrupt_thread_ && rclcpp::ok()) {
-                std::this_thread::sleep_for(poll_period);
-              }
-              if (!rclcpp::ok() || interrupt_thread_) {
-                break;
-              }
+        std::this_thread::sleep_for(poll_period);
+      }
+      if (!rclcpp::ok() || interrupt_thread_) {
+        break;
+      }
 
-              std::unique_lock<std::mutex> data_lock(data_mutex_);"""
+      std::unique_lock<std::mutex> data_lock(data_mutex_);"""
           if source.count(wait_anchor) != 1:
               raise SystemExit("Expected one PAL Statistics publisher wait anchor; refusing to patch.")
           source = source.replace(wait_anchor, wait_replacement, 1)
