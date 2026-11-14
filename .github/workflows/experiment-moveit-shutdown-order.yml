@@ -133,9 +133,36 @@ jobs:
               RCLCPP_INFO(nh->get_logger(), "shutdown A/B: PSM scene publisher stopped and joined");
           """
           source = source.replace(shutdown_anchor, insertion + shutdown_anchor, 1)
+          if source.count("planning_scene_monitor->stopPublishingScene();") != 0:
+              raise SystemExit("Unexpected alternate PSM shutdown anchor.")
+          # Keep the main node and MoveItCpp alive only until MoveGroupExe clears
+          # capability instances; then destroy them before its plugin loader unloads
+          # capability DSOs. The previous run proved nh survived past loader reset.
+          moveit_cpp_anchor = "  const auto moveit_cpp = std::make_shared<moveit_cpp::MoveItCpp>(nh, moveit_cpp_options);"
+          moveit_cpp_replacement = "  auto moveit_cpp = std::make_shared<moveit_cpp::MoveItCpp>(nh, moveit_cpp_options);"
+          psm_anchor = "  const auto planning_scene_monitor = moveit_cpp->getPlanningSceneMonitorNonConst();"
+          psm_replacement = "  auto planning_scene_monitor = moveit_cpp->getPlanningSceneMonitorNonConst();"
+          if source.count(moveit_cpp_anchor) != 1 or source.count(psm_anchor) != 1:
+              raise SystemExit("Expected unique main MoveItCpp/PSM owner declarations.")
+          source = source.replace(moveit_cpp_anchor, moveit_cpp_replacement, 1)
+          source = source.replace(psm_anchor, psm_replacement, 1)
+          shutdown_reset = """    rclcpp::shutdown();
+              planning_scene_monitor.reset();
+              moveit_cpp.reset();
+              nh.reset();"""
+          if source.count(shutdown_anchor) != 1:
+              raise SystemExit("Expected unique main Context shutdown anchor for owner reset.")
+          source = source.replace(shutdown_anchor, shutdown_reset, 1)
+          if not (
+              source.index("rclcpp::shutdown();")
+              < source.index("planning_scene_monitor.reset();")
+              < source.index("moveit_cpp.reset();")
+              < source.index("nh.reset();")
+          ):
+              raise SystemExit("Main node owner reset order validation failed.")
           if source.count("planning_scene_monitor->stopPublishingPlanningScene();") != 1:
               raise SystemExit("PSM publisher stop patch validation failed.")
-          print("Applied one-variable A/B: explicit PSM scene publisher stop/join before Context shutdown.")
+          print("Applied PSM publisher stop and deferred main node-owner release until MoveGroupExe plugin teardown.")
 
           # Targeted plugin-lifetime A/B: declare MoveGroupExe before the executor,
           # so reverse destruction destroys the executor WaitSet while capability
