@@ -434,21 +434,21 @@ jobs:
           export STAUBLI_MOVE_GROUP_GDB_PREFIX='gdb -q -batch -return-child-result -ex "set pagination off" -ex "disable pretty-printer" -ex "set print pretty off" -ex "set print elements 0" -ex "handle SIGINT nostop noprint pass" -ex "set environment LD_DEBUG files" -ex run -ex "bt full" -ex "frame 0" -ex "info args" -ex "p/x this" -ex "x/8gx this" -ex "p/x *(void**)this" -ex "info proc mappings" -ex "x/16i $pc-32" -ex "info registers" -ex "thread apply all bt 40" --args'
           cd /tmp/staubli_ws
           failures=0
-          for iteration in 1 2 3; do
-            echo "=== Strict mock planning + teardown repetition ${iteration}/3 ==="
+          for iteration in 1 2 3 4 5; do
+            echo "=== Strict mock planning + teardown repetition ${iteration}/5 ==="
             set +e
             colcon test --packages-select staubli_moveit_config --event-handlers console_direct+ --return-code-on-test-failure
             test_rc=$?
             colcon test-result --verbose
             result_rc=$?
             set -e
-            echo "=== Repetition ${iteration}/3 exit summary: colcon_test=${test_rc}, test_result=${result_rc} ==="
+            echo "=== Repetition ${iteration}/5 exit summary: colcon_test=${test_rc}, test_result=${result_rc} ==="
             if [ "${test_rc}" -ne 0 ] || [ "${result_rc}" -ne 0 ]; then
               failures=$((failures + 1))
-              echo "Repetition ${iteration}/3 failed; continuing to collect remaining repetitions."
+              echo "Repetition ${iteration}/5 failed; continuing to collect remaining repetitions."
             fi
           done
-          echo "=== Strict regression repetitions complete: failures=${failures}/3 ==="
+          echo "=== Strict regression repetitions complete: failures=${failures}/5 ==="
           test "${failures}" -eq 0
 
       - name: Preserve experiment logs
