@@ -215,7 +215,7 @@ jobs:
           path.write_text(source)
           print("Applied plugin-lifetime A/B and explicit MoveGroupExe capability/loader destructor markers.")
 
-          if False:  # Isolation A/B: disable TEM cleanup to test whether main-node/plugin lifetime fix is sufficient
+          if True:  # Retain required TEM explicit cleanup alongside main-node/plugin lifetime ordering
             tem_path = Path(
                 "/tmp/moveit_ws/src/moveit2/moveit_ros/planning/trajectory_execution_manager/src/"
                 "trajectory_execution_manager.cpp"
@@ -319,7 +319,7 @@ jobs:
                 raise SystemExit("Internal controller-manager teardown order validation failed.")
             tem_path.write_text(tem_source)
 
-          print("Isolation A/B: TEM explicit-cleanup patch disabled; retain main-node owner release and plugin-loader ordering changes.")
+          print("Applied TEM explicit cleanup together with main-node owner release and plugin-loader ordering changes.")
           print("Applied structured MoveIt Jazzy signal-wait patch.")
           print("Validated unique include/init/executor/spin/main anchors and deferred context shutdown.")
           PY
