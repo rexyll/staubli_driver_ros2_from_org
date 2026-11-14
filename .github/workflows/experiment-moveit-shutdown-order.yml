@@ -107,6 +107,76 @@ jobs:
           set -eo pipefail
           mkdir -p /tmp/moveit_ws/src
           git clone --depth 1 --branch jazzy https://github.com/moveit/moveit2.git /tmp/moveit_ws/src/moveit2
+          # Pin PAL Statistics source so its publisher-thread shutdown path can be tested in isolation.
+          git init /tmp/moveit_ws/src/pal_statistics
+          git -C /tmp/moveit_ws/src/pal_statistics remote add origin https://github.com/pal-robotics/pal_statistics.git
+          git -C /tmp/moveit_ws/src/pal_statistics fetch --depth 1 origin d455ae2398b1565ff9ee681e8da63efbe76cf7aa
+          git -C /tmp/moveit_ws/src/pal_statistics checkout --detach FETCH_HEAD
+          test "$(git -C /tmp/moveit_ws/src/pal_statistics rev-parse HEAD)" = "d455ae2398b1565ff9ee681e8da63efbe76cf7aa"
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("/tmp/moveit_ws/src/pal_statistics/pal_statistics/src/pal_statistics.cpp")
+          source = path.read_text()
+          if "#include <chrono>" not in source:
+              source = source.replace("#include <memory>\\n", "#include <chrono>\\n#include <memory>\\n", 1)
+          if "#include <thread>" not in source:
+              source = source.replace("#include <string>\\n", "#include <string>\\n#include <thread>\\n", 1)
+          anchor = """void StatisticsRegistry::publisherThreadCycle()
+          {
+            rclcpp::WallRate rate(2000);
+            while (rclcpp::ok() && !interrupt_thread_) {
+              while (!is_data_ready_ && !interrupt_thread_) {
+                rate.sleep();
+              }
+
+              std::unique_lock<std::mutex> data_lock(data_mutex_);
+
+              while (registration_list_->hasPendingData()) {
+                bool minor_changes = updateMsg(names_msg_, values_msg_, true);
+
+                std::unique_lock<std::mutex> pub_lock(pub_mutex_);
+                data_lock.unlock();
+                doPublish(!minor_changes);
+                pub_lock.unlock();
+                data_lock.lock();
+              }
+              is_data_ready_ = false;
+            }
+          }
+          """
+          replacement = """void StatisticsRegistry::publisherThreadCycle()
+          {
+            // Keep the polling cadence at 2 kHz without sleeping through the ROS
+            // context. WallRate::sleep() can throw after shutdown invalidates it.
+            constexpr auto poll_period = std::chrono::microseconds(500);
+            while (rclcpp::ok() && !interrupt_thread_) {
+              while (!is_data_ready_ && !interrupt_thread_ && rclcpp::ok()) {
+                std::this_thread::sleep_for(poll_period);
+              }
+              if (!rclcpp::ok() || interrupt_thread_) {
+                break;
+              }
+
+              std::unique_lock<std::mutex> data_lock(data_mutex_);
+              while (registration_list_->hasPendingData()) {
+                bool minor_changes = updateMsg(names_msg_, values_msg_, true);
+                std::unique_lock<std::mutex> pub_lock(pub_mutex_);
+                data_lock.unlock();
+                doPublish(!minor_changes);
+                pub_lock.unlock();
+                data_lock.lock();
+              }
+              is_data_ready_ = false;
+            }
+          }
+          """
+          if source.count(anchor) != 1:
+              raise SystemExit("Expected exactly one publisherThreadCycle anchor; refusing to patch.")
+          source = source.replace(anchor, replacement, 1)
+          path.write_text(source)
+          print("Patched PAL Statistics idle wait to poll with std::this_thread and exit on invalid ROS context.")
+          PY
           python3 - <<'PY'
           from pathlib import Path
           import re
@@ -314,7 +384,9 @@ jobs:
           set -eo pipefail
           source /opt/ros/jazzy/setup.bash
           source /tmp/rclcpp_ws/install/setup.bash
-          rosdep install --from-paths /tmp/moveit_ws/src/moveit2 --ignore-src --rosdistro jazzy -y
+          rosdep install --from-paths /tmp/moveit_ws/src --ignore-src --rosdistro jazzy -y
+          cd /tmp/moveit_ws
+          colcon build --packages-select pal_statistics --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_FLAGS='-O1 -g -fno-omit-frame-pointer' -DBUILD_TESTING=OFF
 
       - name: Build patched MoveIt move_group
         shell: bash
@@ -322,6 +394,7 @@ jobs:
           set -eo pipefail
           source /opt/ros/jazzy/setup.bash
           source /tmp/rclcpp_ws/install/setup.bash
+          source /tmp/moveit_ws/install/setup.bash
           cd /tmp/moveit_ws
           colcon build --packages-up-to moveit_ros_move_group --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_FLAGS='-O1 -g -fno-omit-frame-pointer' -DCMAKE_CXX_FLAGS='-O1 -g -fno-omit-frame-pointer' -DBUILD_TESTING=OFF
 
