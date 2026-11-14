@@ -14,6 +14,8 @@
 
 # Author: Thibault Poignonec <thibault.poignonec@gmail.com>
 
+import signal
+
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
@@ -222,6 +224,18 @@ def generate_launch_description():
         def on_activation_exit(event, context):
             if event.returncode == 0:
                 return [LogInfo(msg=f"Controller '{controller_name}' activated successfully.")]
+
+            # launch_testing sends SIGINT to every process after the test completes.
+            # Do not misreport that expected teardown signal as an activation failure.
+            if event.returncode == -signal.SIGINT and context.is_shutdown:
+                return [
+                    LogInfo(
+                        msg=(
+                            f"Controller activation process for '{controller_name}' "
+                            "was interrupted during launch shutdown."
+                        )
+                    )
+                ]
 
             return [
                 LogInfo(
