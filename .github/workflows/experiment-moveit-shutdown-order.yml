@@ -404,7 +404,7 @@ jobs:
           source /tmp/staubli_ws/install/setup.bash
           unset LD_PRELOAD ASAN_OPTIONS
           echo "Running native non-ASan strict mock planning + teardown regression."
-          export STAUBLI_MOVE_GROUP_GDB_PREFIX='gdb -q -batch -return-child-result -ex "set pagination off" -ex "disable pretty-printer" -ex "set print pretty off" -ex "set print elements 0" -ex "handle SIGINT nostop noprint pass" -ex "set environment LD_DEBUG files" -ex run -ex "bt full" -ex "frame 0" -ex "info args" -ex "p/x this" -ex "x/8gx this" -ex "set $cb_vptr = *(void**)this" -ex "info symbol $cb_vptr" -ex "info proc mappings" -ex "x/16i $pc-32" -ex "info registers" -ex "thread apply all bt 40" --args'
+          export STAUBLI_MOVE_GROUP_GDB_PREFIX='gdb -q -batch -return-child-result -ex "set pagination off" -ex "disable pretty-printer" -ex "set print pretty off" -ex "set print elements 0" -ex "handle SIGINT nostop noprint pass" -ex "set environment LD_DEBUG files" -ex run -ex "bt full" -ex "frame 0" -ex "info args" -ex "p/x this" -ex "x/8gx this" -ex "p/x *(void**)this" -ex "info proc mappings" -ex "x/16i $pc-32" -ex "info registers" -ex "thread apply all bt 40" --args'
           cd /tmp/staubli_ws
           failures=0
           for iteration in 1 2 3; do
