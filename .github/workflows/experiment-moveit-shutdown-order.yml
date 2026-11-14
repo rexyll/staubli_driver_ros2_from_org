@@ -116,6 +116,9 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
 
+          api_header = Path("/tmp/moveit_ws/src/pal_statistics/pal_statistics/include/pal_statistics/pal_statistics_macros.hpp").read_text()
+          if "getOrCreateRegistry(" not in api_header:
+              raise SystemExit("Pinned PAL Statistics source does not provide the controller_manager ABI; refusing to build.")
           path = Path("/tmp/moveit_ws/src/pal_statistics/pal_statistics/src/pal_statistics.cpp")
           source = path.read_text()
           if "#include <chrono>" not in source:
