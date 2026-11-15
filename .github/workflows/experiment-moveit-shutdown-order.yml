@@ -330,91 +330,90 @@ jobs:
           git -C /tmp/moveit_ws/src/moveit2 diff -- moveit_ros/planning/trajectory_execution_manager/src/trajectory_execution_manager.cpp
           git -C /tmp/moveit_ws/src/moveit2 diff -- moveit_ros/planning/trajectory_execution_manager/include/moveit/trajectory_execution_manager/trajectory_execution_manager.hpp
 
-      - name: Add deterministic TEM stopExecution race barrier (CI overlay only)
-        shell: bash
-        run: |
-          set -eo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-
-          tem_path = Path("/tmp/moveit_ws/src/moveit2/moveit_ros/planning/trajectory_execution_manager/src/trajectory_execution_manager.cpp")
-          source = tem_path.read_text()
-          include_anchor = "#include <memory>\n"
-          include_extra = "#include <chrono>\n#include <cstdlib>\n#include <fstream>\n#include <string>\n#include <thread>\n"
-          if source.count(include_anchor) != 1:
-              raise SystemExit("Expected unique TEM standard include anchor.")
-          source = source.replace(include_anchor, include_extra + include_anchor, 1)
-
-          stop_anchor = """void TrajectoryExecutionManager::stopExecution(bool auto_clear)
-{
-  if (!execution_complete_)
-  {
-    execution_state_mutex_.lock();"""
-          stop_replacement = """void TrajectoryExecutionManager::stopExecution(bool auto_clear)
-{
-  bool test_barrier_entered = false;
-              "  if (const char* barrier_dir = std::getenv(\"STAUBLI_TEM_STOP_BARRIER_DIR\"))\n"
-  if (!execution_complete_)
-  {
-    if (test_barrier_dir && *test_barrier_dir)
-    {
-      test_barrier_entered = true;
-      const std::string marker_prefix = std::string(test_barrier_dir) + "/";
-              "    marker << 1 << std::endl;\n"
-      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(45);
-      bool released = false;
-      while (std::chrono::steady_clock::now() < deadline)
-      {
-        std::ifstream release(marker_prefix + "release");
-        if (release.good()) { released = true; break; }
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-      }
-      { std::ofstream marker(marker_prefix + "released"); marker << (released ? 1 : 0) << std::endl; }
-    }
-    execution_state_mutex_.lock();"""
-          if source.count(stop_anchor) != 1:
-              raise SystemExit("Expected unique stopExecution first-check anchor.")
-          source = source.replace(stop_anchor, stop_replacement, 1)
-
-          function_start = source.index("void TrajectoryExecutionManager::stopExecution(bool auto_clear)")
-          function_end = source.index("\nvoid TrajectoryExecutionManager::execute(", function_start)
-          stop_function = source[function_start:function_end]
-          if not stop_function.endswith("\n}"):
-              raise SystemExit("Unexpected stopExecution function tail.")
-          state_marker = """
-  if (test_barrier_entered)
-  {
-    bool thread_joinable = false;
-    std::size_t handle_count = 0;
-    { std::lock_guard<std::mutex> thread_lock(execution_thread_mutex_); thread_joinable = execution_thread_ && execution_thread_->joinable(); }
-    { std::lock_guard<std::mutex> state_lock(execution_state_mutex_); handle_count = active_handles_.size(); }
-    std::ofstream marker(std::string(test_barrier_dir) + "/state");
-    marker << "execution_thread_joinable=" << (thread_joinable ? 1 : 0) << std::endl;
-    marker << "active_handles=" << handle_count << std::endl;
-  }
-"""
-          stop_function = stop_function[:-2] + state_marker + "\n}"
-          source = source[:function_start] + stop_function + source[function_end:]
-
-              "  if (callback)\n    callback(last_execution_status_);\n"
-          thread_end_marker = (
-              "  if (callback)\\n    callback(last_execution_status_);\\n"
-              "  if (const char* barrier_dir = std::getenv(\\\"STAUBLI_TEM_STOP_BARRIER_DIR\\\"))\\n"
-              "  {\\n"
-              "    std::ofstream marker(std::string(barrier_dir) + \"/thread_finished\");\n"
-              "    marker << 1 << std::endl;\\n"
-              "  }\n}"
-          )
-          if source.count(thread_end_anchor) != 1:
-              raise SystemExit("Expected unique executeThread completion callback anchor.")
-          source = source.replace(thread_end_anchor, thread_end_marker, 1)
-          if not all(token in source for token in ("STAUBLI_TEM_STOP_BARRIER_DIR", "thread_finished", "execution_thread_joinable=")):
-              raise SystemExit("TEM race-barrier self-validation failed.")
-          tem_path.write_text(source)
-          print("Installed test-only TEM stopExecution barrier and joinable/active-handle state marker.")
-          PY
-
+          - name: Add deterministic TEM stopExecution race barrier (CI overlay only)
+            shell: bash
+            run: |
+              set -eo pipefail
+              python3 - <<'PY'
+              from pathlib import Path
+              
+              tem_path = Path("/tmp/moveit_ws/src/moveit2/moveit_ros/planning/trajectory_execution_manager/src/trajectory_execution_manager.cpp")
+              source = tem_path.read_text()
+              include_anchor = "#include <memory>\n"
+              include_extra = "#include <chrono>\n#include <cstdlib>\n#include <fstream>\n#include <string>\n#include <thread>\n"
+              if source.count(include_anchor) != 1:
+                raise SystemExit("Expected unique TEM standard include anchor.")
+              source = source.replace(include_anchor, include_extra + include_anchor, 1)
+              
+              stop_anchor = """void TrajectoryExecutionManager::stopExecution(bool auto_clear)
+          {
+            if (!execution_complete_)
+            {
+              execution_state_mutex_.lock();"""
+              stop_replacement = """void TrajectoryExecutionManager::stopExecution(bool auto_clear)
+          {
+            bool test_barrier_entered = false;
+            const char* test_barrier_dir = std::getenv("STAUBLI_TEM_STOP_BARRIER_DIR");
+            if (!execution_complete_)
+            {
+              if (test_barrier_dir && *test_barrier_dir)
+              {
+                test_barrier_entered = true;
+                const std::string marker_prefix = std::string(test_barrier_dir) + "/";
+                { std::ofstream marker(marker_prefix + "entered"); marker << 1 << std::endl; }
+                const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(45);
+                bool released = false;
+                while (std::chrono::steady_clock::now() < deadline)
+                {
+                  std::ifstream release(marker_prefix + "release");
+                  if (release.good()) { released = true; break; }
+                  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                }
+                { std::ofstream marker(marker_prefix + "released"); marker << (released ? 1 : 0) << std::endl; }
+              }
+              execution_state_mutex_.lock();"""
+              if source.count(stop_anchor) != 1:
+                raise SystemExit("Expected unique stopExecution first-check anchor.")
+              source = source.replace(stop_anchor, stop_replacement, 1)
+              
+              function_start = source.index("void TrajectoryExecutionManager::stopExecution(bool auto_clear)")
+              function_end = source.index("\nvoid TrajectoryExecutionManager::execute(", function_start)
+              stop_function = source[function_start:function_end]
+              if not stop_function.endswith("\n}"):
+                raise SystemExit("Unexpected stopExecution function tail.")
+              state_marker = """
+            if (test_barrier_entered)
+            {
+              bool thread_joinable = false;
+              std::size_t handle_count = 0;
+              { std::lock_guard<std::mutex> thread_lock(execution_thread_mutex_); thread_joinable = execution_thread_ && execution_thread_->joinable(); }
+              { std::lock_guard<std::mutex> state_lock(execution_state_mutex_); handle_count = active_handles_.size(); }
+              std::ofstream marker(std::string(test_barrier_dir) + "/state");
+              marker << "execution_thread_joinable=" << (thread_joinable ? 1 : 0) << std::endl;
+              marker << "active_handles=" << handle_count << std::endl;
+            }
+              """
+              stop_function = stop_function[:-2] + state_marker + "\n}"
+              source = source[:function_start] + stop_function + source[function_end:]
+              
+              thread_end_anchor = "  if (callback)\n    callback(last_execution_status_);\n}"
+              thread_end_marker = (
+                "  if (callback)\n    callback(last_execution_status_);\n"
+                "  if (const char* barrier_dir = std::getenv(\"STAUBLI_TEM_STOP_BARRIER_DIR\"))\n"
+                "  {\n"
+                "    std::ofstream marker(std::string(barrier_dir) + \"/thread_finished\");\n"
+                "    marker << 1 << std::endl;\n"
+                "  }\n}"
+              )
+              if source.count(thread_end_anchor) != 1:
+                raise SystemExit("Expected unique executeThread completion callback anchor.")
+              source = source.replace(thread_end_anchor, thread_end_marker, 1)
+              if not all(token in source for token in ("STAUBLI_TEM_STOP_BARRIER_DIR", "thread_finished", "execution_thread_joinable=")):
+                raise SystemExit("TEM race-barrier self-validation failed.")
+              tem_path.write_text(source)
+              print("Installed test-only TEM stopExecution barrier and joinable/active-handle state marker.")
+              PY
+          
       - name: Install MoveIt source dependencies
         shell: bash
         run: |
