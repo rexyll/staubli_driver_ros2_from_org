@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - "experiment/move-group-shutdown-order"
+      - "experiment/moveit-main-owner-lifetime-only"
 
 permissions:
   contents: read
@@ -215,7 +216,7 @@ jobs:
           path.write_text(source)
           print("Applied plugin-lifetime A/B and explicit MoveGroupExe capability/loader destructor markers.")
 
-          if True:  # Retain required TEM explicit cleanup alongside main-node/plugin lifetime ordering
+          if False:  # Factorial A/B: main owner reset enabled; TEM explicit cleanup disabled
             tem_path = Path(
                 "/tmp/moveit_ws/src/moveit2/moveit_ros/planning/trajectory_execution_manager/src/"
                 "trajectory_execution_manager.cpp"
