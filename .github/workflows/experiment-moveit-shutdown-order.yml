@@ -418,6 +418,7 @@ jobs:
               marker << "join_performed=" << (test_join_performed ? 1 : 0) << std::endl;
             }
           }
+          """
           source = source[:function_start] + stop_function + source[function_end:]
 
           thread_end_anchor = "  if (callback)\n    callback(last_execution_status_);\n}"
