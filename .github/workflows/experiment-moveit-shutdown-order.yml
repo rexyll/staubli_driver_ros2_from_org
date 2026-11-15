@@ -368,7 +368,78 @@ jobs:
             exit 1
           fi
           echo "Verified PR launch test blob: $test_blob ($test_file); no test-side controller deactivation."
-          echo "Using the PR launch test file unchanged; no test-side controller deactivation overlay."
+          echo "Verified original PR launch-test blob; adding a separate plan-and-execute test overlay (no controller-deactivation injection)."
+          python3 - <<'PY'
+          from pathlib import Path
+
+          test_path = Path("/tmp/staubli_ws/src/staubli_driver_ros2/staubli_moveit_config/test/test_moveit_mock_planning.launch.py")
+          source = test_path.read_text()
+
+          shutdown_anchor = "\\n\\n@launch_testing.post_shutdown_test()\\n"
+          method_name = "test_z_move_group_executes_joint_goal_on_mock_controller"
+          if source.count(shutdown_anchor) != 1 or method_name in source:
+              raise SystemExit("Unexpected launch-test structure; refusing to add execution coverage.")
+
+          method = '''
+              def test_z_move_group_executes_joint_goal_on_mock_controller(self):
+                  """Run a real MoveGroup plan-and-execute request on mock hardware."""
+                  client = ActionClient(self.node, MoveGroup, "/move_action")
+                  self.assertTrue(
+                      client.wait_for_server(timeout_sec=120.0),
+                      "MoveGroup action server did not become available for execution",
+                  )
+
+                  goal = MoveGroup.Goal()
+                  goal.request.group_name = "arm"
+                  goal.request.pipeline_id = "ompl"
+                  goal.request.allowed_planning_time = 10.0
+                  goal.request.num_planning_attempts = 2
+                  goal.request.max_velocity_scaling_factor = 0.5
+                  goal.request.max_acceleration_scaling_factor = 0.5
+                  goal.request.start_state.is_diff = True
+
+                  constraints = Constraints()
+                  target_positions = (0.11, 0.21, 0.31, 0.41, 0.51, 0.61)
+                  for index, position in enumerate(target_positions, start=1):
+                      joint = JointConstraint()
+                      joint.joint_name = f"joint_{index}"
+                      joint.position = position
+                      joint.tolerance_above = 0.05
+                      joint.tolerance_below = 0.05
+                      joint.weight = 1.0
+                      constraints.joint_constraints.append(joint)
+                  goal.request.goal_constraints.append(constraints)
+
+                  goal.planning_options.plan_only = False
+                  goal.planning_options.replan = False
+                  goal.planning_options.look_around = False
+
+                  send_future = client.send_goal_async(goal)
+                  rclpy.spin_until_future_complete(self.node, send_future, timeout_sec=30.0)
+                  self.assertTrue(send_future.done(), "MoveGroup execution goal submission timed out")
+                  goal_handle = send_future.result()
+                  self.assertIsNotNone(goal_handle)
+                  self.assertTrue(goal_handle.accepted, "MoveGroup rejected the execution goal")
+
+                  result_future = goal_handle.get_result_async()
+                  rclpy.spin_until_future_complete(self.node, result_future, timeout_sec=120.0)
+                  self.assertTrue(result_future.done(), "MoveGroup execution result timed out")
+                  result = result_future.result().result
+                  self.assertEqual(result.error_code.val, MoveItErrorCodes.SUCCESS)
+                  self.assertTrue(
+                      result.executed_trajectory.joint_trajectory.points,
+                      "MoveIt did not report an executed trajectory",
+                  )
+          '''
+
+          source = source.replace(
+              shutdown_anchor,
+              "\\n\\n" + method + shutdown_anchor,
+              1,
+          )
+          test_path.write_text(source)
+          print("Added isolated plan_only=False execution coverage after the original PR blob SHA check.")
+          PY
           rosdep install --from-paths /tmp/staubli_ws/src --ignore-src --rosdistro jazzy -y
           cd /tmp/staubli_ws
           colcon build --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_FLAGS='-O1 -g -fno-omit-frame-pointer' -DCMAKE_CXX_FLAGS='-O1 -g -fno-omit-frame-pointer' -DBUILD_TESTING=ON
@@ -382,12 +453,12 @@ jobs:
           source /tmp/moveit_ws/install/setup.bash
           source /tmp/staubli_ws/install/setup.bash
           unset LD_PRELOAD ASAN_OPTIONS
-          echo "Running native non-ASan strict mock planning + teardown regression."
+          echo "Running native non-ASan mock planning + trajectory execution + strict teardown regression."
           export STAUBLI_MOVE_GROUP_GDB_PREFIX='gdb -q -batch -return-child-result -ex "set pagination off" -ex "disable pretty-printer" -ex "set print pretty off" -ex "set print elements 0" -ex "handle SIGINT nostop noprint pass" -ex "set environment LD_DEBUG files" -ex run -ex "bt full" -ex "frame 0" -ex "info args" -ex "p/x this" -ex "x/8gx this" -ex "p/x *(void**)this" -ex "info proc mappings" -ex "x/16i $pc-32" -ex "info registers" -ex "thread apply all bt 40" --args'
           cd /tmp/staubli_ws
           failures=0
           for iteration in 1 2 3 4 5; do
-            echo "=== Strict mock planning + teardown repetition ${iteration}/5 ==="
+            echo "=== Mock planning + trajectory execution + teardown repetition ${iteration}/5 ==="
             set +e
             colcon test --packages-select staubli_moveit_config --event-handlers console_direct+ --return-code-on-test-failure
             test_rc=$?
@@ -400,7 +471,7 @@ jobs:
               echo "Repetition ${iteration}/5 failed; continuing to collect remaining repetitions."
             fi
           done
-          echo "=== Strict regression repetitions complete: failures=${failures}/5 ==="
+          echo "=== Mock plan-and-execute teardown repetitions complete: failures=${failures}/5 ==="
           test "${failures}" -eq 0
 
       - name: Preserve experiment logs
