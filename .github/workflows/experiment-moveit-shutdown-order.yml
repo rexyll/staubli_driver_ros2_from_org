@@ -101,7 +101,7 @@ jobs:
           cd /tmp/rclcpp_ws
           colcon build --packages-select rclcpp --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_FLAGS='-O1 -g -fno-omit-frame-pointer' -DCMAKE_CXX_FLAGS='-O1 -g -fno-omit-frame-pointer' -DBUILD_TESTING=OFF
 
-      - name: Fetch MoveIt Jazzy source and apply controlled signal-wait and teardown-order experiment
+      - name: Fetch MoveIt Jazzy source and apply teardown-order experiment (stock signal handling)
         shell: bash
         run: |
           set -eo pipefail
@@ -320,7 +320,7 @@ jobs:
             tem_path.write_text(tem_source)
 
           print("Applied TEM explicit cleanup together with main-node owner release and plugin-loader ordering changes.")
-          print("Applied structured MoveIt Jazzy signal-wait patch.")
+          print("Retained stock MoveIt Jazzy signal handling; no signal-wait patch was applied.")
           print("Validated unique include/init/executor/spin/main anchors and deferred context shutdown.")
           PY
           git -C /tmp/moveit_ws/src/moveit2 diff --check
