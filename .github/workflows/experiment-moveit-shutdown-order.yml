@@ -531,8 +531,8 @@ jobs:
           '''
 
           race_method = '''
-              def test_zz_move_group_cancel_completion_check_lock_recheck(self):
-                  """Pause stopExecution after its first read, finish the trajectory, then inspect join state."""
+              def test_zz_move_group_cancel_completed_thread_is_joined(self):
+                  """Pause stopExecution before its state lock, finish the trajectory, and require an immediate join."""
                   barrier_dir = os.environ.get("STAUBLI_TEM_STOP_BARRIER_DIR")
                   self.assertTrue(barrier_dir, "TEM stop barrier directory was not configured")
                   os.makedirs(barrier_dir, exist_ok=True)
@@ -599,6 +599,8 @@ jobs:
                   with open(os.path.join(barrier_dir, "release"), "w", encoding="utf-8") as release_file:
                       release_file.write("release\\n")
                   self.assertTrue(wait_for_marker("released", 5.0), "TEM barrier release was not observed")
+                  with open(os.path.join(barrier_dir, "released"), encoding="utf-8") as released_file:
+                      self.assertEqual(released_file.read().strip(), "1", "TEM barrier did not observe release")
                   self.assertTrue(wait_for_marker("state", 10.0), "TEM post-barrier state marker was not written")
                   with open(os.path.join(barrier_dir, "state"), encoding="utf-8") as state_file:
                       state_text = state_file.read()
@@ -614,7 +616,7 @@ jobs:
           source = source.replace(shutdown_anchor, "\n\n" + normal_method + "\n\n" + race_method + shutdown_anchor, 1)
           ast.parse(source, filename=str(test_path))
           test_path.write_text(source)
-          print("Added normal mock execution plus deterministic MoveGroup cancel/TEM stop check-lock-recheck test.")
+          print("Added normal mock execution plus deterministic MoveGroup cancel/TEM immediate-join regression.")
           PY
           rosdep install --from-paths /tmp/staubli_ws/src --ignore-src --rosdistro jazzy -y
           cd /tmp/staubli_ws
