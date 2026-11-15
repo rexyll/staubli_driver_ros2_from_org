@@ -125,14 +125,14 @@ jobs:
               raise SystemExit("Expected exactly one upstream rclcpp::shutdown anchor.")
           if "sigwait(" in source or "SignalHandlerOptions::None" in source:
               raise SystemExit("Unexpected custom signal handling in upstream baseline.")
-          shutdown_anchor = "\n\n@launch_testing.post_shutdown_test()\n"
+          shutdown_anchor = "    rclcpp::shutdown();"
           if source.count(shutdown_anchor) != 1:
               raise SystemExit("Expected exactly one upstream rclcpp::shutdown call.")
           insertion = """    RCLCPP_INFO(nh->get_logger(), "shutdown A/B: stopping PSM scene publisher before Context shutdown");
               planning_scene_monitor->stopPublishingPlanningScene();
               RCLCPP_INFO(nh->get_logger(), "shutdown A/B: PSM scene publisher stopped and joined");
           """
-          source = source.replace(shutdown_anchor, "\n\n" + normal_method + "\n\n" + race_method + shutdown_anchor, 1)
+          source = source.replace(shutdown_anchor, insertion + shutdown_anchor, 1)
           if source.count("planning_scene_monitor->stopPublishingScene();") != 0:
               raise SystemExit("Unexpected alternate PSM shutdown anchor.")
           # Keep the main node and MoveItCpp alive only until MoveGroupExe clears
@@ -330,27 +330,28 @@ jobs:
           git -C /tmp/moveit_ws/src/moveit2 diff -- moveit_ros/planning/trajectory_execution_manager/src/trajectory_execution_manager.cpp
           git -C /tmp/moveit_ws/src/moveit2 diff -- moveit_ros/planning/trajectory_execution_manager/include/moveit/trajectory_execution_manager/trajectory_execution_manager.hpp
 
-          - name: Add deterministic TEM stopExecution race barrier (CI overlay only)
-            shell: bash
-            run: |
-              set -eo pipefail
-              python3 - <<'PY'
-              from pathlib import Path
-              
-              tem_path = Path("/tmp/moveit_ws/src/moveit2/moveit_ros/planning/trajectory_execution_manager/src/trajectory_execution_manager.cpp")
-              source = tem_path.read_text()
-              include_anchor = "#include <memory>\n"
-              include_extra = "#include <chrono>\n#include <cstdlib>\n#include <fstream>\n#include <string>\n#include <thread>\n"
-              if source.count(include_anchor) != 1:
-                raise SystemExit("Expected unique TEM standard include anchor.")
-              source = source.replace(include_anchor, include_extra + include_anchor, 1)
-              
-              stop_anchor = """void TrajectoryExecutionManager::stopExecution(bool auto_clear)
+      - name: Add deterministic TEM stopExecution race barrier (CI overlay only)
+        shell: bash
+        run: |
+          set -eo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          tem_path = Path("/tmp/moveit_ws/src/moveit2/moveit_ros/planning/trajectory_execution_manager/src/trajectory_execution_manager.cpp")
+          source = tem_path.read_text()
+
+          include_anchor = "#include <memory>\n"
+          include_extra = "#include <chrono>\n#include <cstdlib>\n#include <fstream>\n#include <string>\n#include <thread>\n"
+          if source.count(include_anchor) != 1:
+              raise SystemExit("Expected unique TEM standard include anchor.")
+          source = source.replace(include_anchor, include_extra + include_anchor, 1)
+
+          stop_anchor = """void TrajectoryExecutionManager::stopExecution(bool auto_clear)
           {
             if (!execution_complete_)
             {
               execution_state_mutex_.lock();"""
-              stop_replacement = """void TrajectoryExecutionManager::stopExecution(bool auto_clear)
+          stop_replacement = """void TrajectoryExecutionManager::stopExecution(bool auto_clear)
           {
             bool test_barrier_entered = false;
             const char* test_barrier_dir = std::getenv("STAUBLI_TEM_STOP_BARRIER_DIR");
@@ -372,16 +373,16 @@ jobs:
                 { std::ofstream marker(marker_prefix + "released"); marker << (released ? 1 : 0) << std::endl; }
               }
               execution_state_mutex_.lock();"""
-              if source.count(stop_anchor) != 1:
-                raise SystemExit("Expected unique stopExecution first-check anchor.")
-              source = source.replace(stop_anchor, stop_replacement, 1)
-              
-              function_start = source.index("void TrajectoryExecutionManager::stopExecution(bool auto_clear)")
-              function_end = source.index("\nvoid TrajectoryExecutionManager::execute(", function_start)
-              stop_function = source[function_start:function_end]
-              if not stop_function.endswith("\n}"):
-                raise SystemExit("Unexpected stopExecution function tail.")
-              state_marker = """
+          if source.count(stop_anchor) != 1:
+              raise SystemExit("Expected unique stopExecution first-check anchor.")
+          source = source.replace(stop_anchor, stop_replacement, 1)
+
+          function_start = source.index("void TrajectoryExecutionManager::stopExecution(bool auto_clear)")
+          function_end = source.index("\nvoid TrajectoryExecutionManager::execute(", function_start)
+          stop_function = source[function_start:function_end]
+          if not stop_function.endswith("\n}"):
+              raise SystemExit("Unexpected stopExecution function tail.")
+          state_marker = """
             if (test_barrier_entered)
             {
               bool thread_joinable = false;
@@ -392,28 +393,27 @@ jobs:
               marker << "execution_thread_joinable=" << (thread_joinable ? 1 : 0) << std::endl;
               marker << "active_handles=" << handle_count << std::endl;
             }
-              """
-              stop_function = stop_function[:-2] + state_marker + "\n}"
-              source = source[:function_start] + stop_function + source[function_end:]
-              
-              thread_end_anchor = "  if (callback)\n    callback(last_execution_status_);\n}"
-              thread_end_marker = (
-                "  if (callback)\n    callback(last_execution_status_);\n"
-                "  if (const char* barrier_dir = std::getenv(\"STAUBLI_TEM_STOP_BARRIER_DIR\"))\n"
-                "  {\n"
-                "    std::ofstream marker(std::string(barrier_dir) + \"/thread_finished\");\n"
-                "    marker << 1 << std::endl;\n"
-                "  }\n}"
-              )
-              if source.count(thread_end_anchor) != 1:
-                raise SystemExit("Expected unique executeThread completion callback anchor.")
-              source = source.replace(thread_end_anchor, thread_end_marker, 1)
-              if not all(token in source for token in ("STAUBLI_TEM_STOP_BARRIER_DIR", "thread_finished", "execution_thread_joinable=")):
-                raise SystemExit("TEM race-barrier self-validation failed.")
-              tem_path.write_text(source)
-              print("Installed test-only TEM stopExecution barrier and joinable/active-handle state marker.")
-              PY
-          
+          """
+          stop_function = stop_function[:-2] + state_marker + "\n}"
+          source = source[:function_start] + stop_function + source[function_end:]
+
+          thread_end_anchor = "  if (callback)\n    callback(last_execution_status_);\n}"
+          thread_end_marker = (
+              "  if (callback)\n    callback(last_execution_status_);\n"
+              "  if (const char* barrier_dir = std::getenv(\"STAUBLI_TEM_STOP_BARRIER_DIR\"))\n"
+              "  {\n"
+              "    std::ofstream marker(std::string(barrier_dir) + \"/thread_finished\");\n"
+              "    marker << 1 << std::endl;\n"
+              "  }\n}"
+          )
+          if source.count(thread_end_anchor) != 1:
+              raise SystemExit("Expected unique executeThread completion callback anchor.")
+          source = source.replace(thread_end_anchor, thread_end_marker, 1)
+          if not all(token in source for token in ("STAUBLI_TEM_STOP_BARRIER_DIR", "thread_finished", "execution_thread_joinable=")):
+              raise SystemExit("TEM race-barrier self-validation failed.")
+          tem_path.write_text(source)
+          print("Installed test-only TEM stopExecution barrier and joinable/active-handle state marker.")
+          PY
       - name: Install MoveIt source dependencies
         shell: bash
         run: |
@@ -461,7 +461,7 @@ jobs:
 
           test_path = Path("/tmp/staubli_ws/src/staubli_driver_ros2/staubli_moveit_config/test/test_moveit_mock_planning.launch.py")
           source = test_path.read_text()
-          shutdown_anchor = "\\n\\n@launch_testing.post_shutdown_test()\\n"
+          shutdown_anchor = "\n\n@launch_testing.post_shutdown_test()\n"
           if source.count(shutdown_anchor) != 1:
               raise SystemExit("Unexpected launch-test structure; refusing to add execution coverage.")
 
@@ -556,7 +556,7 @@ jobs:
                   while time.monotonic() < monitor_deadline and feedback_state["value"] != "MONITOR":
                       rclpy.spin_once(self.node, timeout_sec=0.1)
                   self.assertEqual(feedback_state["value"], "MONITOR", "MoveGroup never entered MONITOR state")
-                  time.sleep(0.2)
+                  time.sleep(0.1)
                   cancel_future = goal_handle.cancel_goal_async()
                   rclpy.spin_until_future_complete(self.node, cancel_future, timeout_sec=15.0)
                   self.assertTrue(cancel_future.done(), "MoveGroup cancel request timed out")
@@ -583,11 +583,10 @@ jobs:
                   self.assertEqual(result_future.result().result.error_code.val, MoveItErrorCodes.PREEMPTED)
           '''
 
-          source = source.replace(shutdown_anchor, "\\n\\n" + normal_method + "\\n\\n" + race_method + shutdown_anchor, 1)
+          source = source.replace(shutdown_anchor, "\n\n" + normal_method + "\n\n" + race_method + shutdown_anchor, 1)
           test_path.write_text(source)
           print("Added normal mock execution plus deterministic MoveGroup cancel/TEM stop check-lock-recheck test.")
           PY
-
           rosdep install --from-paths /tmp/staubli_ws/src --ignore-src --rosdistro jazzy -y
           cd /tmp/staubli_ws
           colcon build --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_FLAGS='-O1 -g -fno-omit-frame-pointer' -DCMAKE_CXX_FLAGS='-O1 -g -fno-omit-frame-pointer' -DBUILD_TESTING=ON
