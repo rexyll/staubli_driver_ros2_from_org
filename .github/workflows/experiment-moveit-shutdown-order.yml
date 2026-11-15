@@ -5,6 +5,7 @@ on:
     branches:
       - "experiment/move-group-shutdown-order"
       - "experiment/move-group-shutdown-order-barrier-fix"
+      - "experiment/move-group-stop-execution-join-fix"
 
 permissions:
   contents: read
@@ -342,26 +343,27 @@ jobs:
           source = tem_path.read_text()
 
           include_anchor = "#include <memory>\n"
-          include_extra = "#include <chrono>\n#include <cstdlib>\n#include <fstream>\n#include <string>\n#include <thread>\n"
+          include_extra = "#include <chrono>\n#include <cstdio>\n#include <cstdlib>\n#include <fstream>\n#include <string>\n#include <thread>\n"
           if source.count(include_anchor) != 1:
               raise SystemExit("Expected unique TEM standard include anchor.")
           source = source.replace(include_anchor, include_extra + include_anchor, 1)
 
-          stop_anchor = """void TrajectoryExecutionManager::stopExecution(bool auto_clear)
-          {
-            if (!execution_complete_)
-            {
-              execution_state_mutex_.lock();"""
-          stop_replacement = """void TrajectoryExecutionManager::stopExecution(bool auto_clear)
+          function_start = source.index("void TrajectoryExecutionManager::stopExecution(bool auto_clear)")
+          function_end = source.index("\\nvoid TrajectoryExecutionManager::execute(", function_start)
+          stop_function = """void TrajectoryExecutionManager::stopExecution(bool auto_clear)
           {
             bool test_barrier_entered = false;
+            bool test_join_performed = false;
             const char* test_barrier_dir = std::getenv("STAUBLI_TEM_STOP_BARRIER_DIR");
-            if (!execution_complete_)
+            std::string marker_prefix;
+            if (test_barrier_dir && *test_barrier_dir)
             {
-              if (test_barrier_dir && *test_barrier_dir)
+              marker_prefix = std::string(test_barrier_dir) + "/";
+              std::ifstream arm(marker_prefix + "arm");
+              if (arm.good())
               {
+                std::remove((marker_prefix + "arm").c_str());
                 test_barrier_entered = true;
-                const std::string marker_prefix = std::string(test_barrier_dir) + "/";
                 { std::ofstream marker(marker_prefix + "entered"); marker << 1 << std::endl; }
                 const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(45);
                 bool released = false;
@@ -373,32 +375,52 @@ jobs:
                 }
                 { std::ofstream marker(marker_prefix + "released"); marker << (released ? 1 : 0) << std::endl; }
               }
-              execution_state_mutex_.lock();"""
-          if source.count(stop_anchor) != 1:
-              raise SystemExit("Expected unique stopExecution first-check anchor.")
-          source = source.replace(stop_anchor, stop_replacement, 1)
+            }
 
-          function_start = source.index("void TrajectoryExecutionManager::stopExecution(bool auto_clear)")
-          function_end = source.index("\nvoid TrajectoryExecutionManager::execute(", function_start)
-          stop_function = source[function_start:function_end]
-          if not stop_function.rstrip().endswith("}"):
-              raise SystemExit("Unexpected stopExecution function tail.")
-          state_marker = """
+            bool stop_requested = false;
+            {
+              std::scoped_lock state_lock(execution_state_mutex_);
+              if (!execution_complete_)
+              {
+                execution_complete_ = true;
+                stopExecutionInternal();
+                last_execution_status_ = moveit_controller_manager::ExecutionStatus::PREEMPTED;
+                stop_requested = true;
+              }
+            }
+            if (stop_requested)
+              RCLCPP_INFO(logger_, "Stopped trajectory execution.");
+
+            // Always join a completed execution thread, including when natural
+            // completion wins before the state lock is acquired.
+            {
+              std::scoped_lock thread_lock(execution_thread_mutex_);
+              if (execution_thread_)
+              {
+                execution_thread_->join();
+                execution_thread_.reset();
+                test_join_performed = true;
+              }
+            }
+
+            if (stop_requested && auto_clear)
+              clear();
+
             if (test_barrier_entered)
             {
               bool thread_joinable = false;
               std::size_t handle_count = 0;
               { std::lock_guard<std::mutex> thread_lock(execution_thread_mutex_); thread_joinable = execution_thread_ && execution_thread_->joinable(); }
               { std::lock_guard<std::mutex> state_lock(execution_state_mutex_); handle_count = active_handles_.size(); }
-              std::ofstream marker(std::string(test_barrier_dir) + "/state");
+              std::ofstream marker(marker_prefix + "state");
               marker << "execution_thread_joinable=" << (thread_joinable ? 1 : 0) << std::endl;
               marker << "active_handles=" << handle_count << std::endl;
+              marker << "join_performed=" << (test_join_performed ? 1 : 0) << std::endl;
             }
-          """
-          trimmed_stop_function = stop_function.rstrip()
-          stop_function = trimmed_stop_function[:-1] + state_marker + "\n}" + stop_function[len(trimmed_stop_function):]
+          }
           source = source[:function_start] + stop_function + source[function_end:]
 
+          thread_end_anchor = "  if (callback)\\n    callback(last_execution_status_);\\n}"
           thread_end_anchor = "  if (callback)\n    callback(last_execution_status_);\n}"
           thread_end_marker = (
               "  if (callback)\n    callback(last_execution_status_);\n"
@@ -411,10 +433,10 @@ jobs:
           if source.count(thread_end_anchor) != 1:
               raise SystemExit("Expected unique executeThread completion callback anchor.")
           source = source.replace(thread_end_anchor, thread_end_marker, 1)
-          if not all(token in source for token in ("STAUBLI_TEM_STOP_BARRIER_DIR", "thread_finished", "execution_thread_joinable=")):
-              raise SystemExit("TEM race-barrier self-validation failed.")
+          if not all(token in source for token in ("STAUBLI_TEM_STOP_BARRIER_DIR", "thread_finished", "execution_thread_joinable=", "join_performed=")):
+              raise SystemExit("TEM join-fix self-validation failed.")
           tem_path.write_text(source)
-          print("Installed test-only TEM stopExecution barrier and joinable/active-handle state marker.")
+          print("Installed CI-only stopExecution always-join candidate with deterministic completion barrier and join-result marker.")
           PY
       - name: Install MoveIt source dependencies
         shell: bash
@@ -515,7 +537,7 @@ jobs:
                   barrier_dir = os.environ.get("STAUBLI_TEM_STOP_BARRIER_DIR")
                   self.assertTrue(barrier_dir, "TEM stop barrier directory was not configured")
                   os.makedirs(barrier_dir, exist_ok=True)
-                  for marker_name in ("entered", "release", "released", "thread_finished", "state"):
+                  for marker_name in ("arm", "entered", "release", "released", "thread_finished", "state"):
                       marker_path = os.path.join(barrier_dir, marker_name)
                       if os.path.exists(marker_path):
                           os.remove(marker_path)
@@ -560,6 +582,8 @@ jobs:
                       rclpy.spin_once(self.node, timeout_sec=0.1)
                   self.assertEqual(feedback_state["value"], "MONITOR", "MoveGroup never entered MONITOR state")
                   time.sleep(0.1)
+                  with open(os.path.join(barrier_dir, "arm"), "w", encoding="utf-8") as arm_file:
+                      arm_file.write("1\\n")
                   cancel_future = goal_handle.cancel_goal_async()
                   rclpy.spin_until_future_complete(self.node, cancel_future, timeout_sec=15.0)
                   self.assertTrue(cancel_future.done(), "MoveGroup cancel request timed out")
@@ -575,11 +599,13 @@ jobs:
                   self.assertTrue(wait_for_marker("thread_finished", 35.0), "TEM execution thread did not naturally finish")
                   with open(os.path.join(barrier_dir, "release"), "w", encoding="utf-8") as release_file:
                       release_file.write("release\\n")
+                  self.assertTrue(wait_for_marker("released", 5.0), "TEM barrier release was not observed")
                   self.assertTrue(wait_for_marker("state", 10.0), "TEM post-barrier state marker was not written")
                   with open(os.path.join(barrier_dir, "state"), encoding="utf-8") as state_file:
                       state_text = state_file.read()
-                  self.assertIn("execution_thread_joinable=1", state_text, state_text)
+                  self.assertIn("execution_thread_joinable=0", state_text, state_text)
                   self.assertIn("active_handles=0", state_text, state_text)
+                  self.assertIn("join_performed=1", state_text, state_text)
                   result_future = goal_handle.get_result_async()
                   rclpy.spin_until_future_complete(self.node, result_future, timeout_sec=30.0)
                   self.assertTrue(result_future.done(), "Preempted MoveGroup action result timed out")
