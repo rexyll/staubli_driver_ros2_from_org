@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - "experiment/move-group-shutdown-order"
+      - "experiment/move-group-shutdown-order-barrier-fix"
 
 permissions:
   contents: read
@@ -458,6 +459,7 @@ jobs:
           echo "Verified original PR launch-test blob; adding a separate plan-and-execute test overlay (no controller-deactivation injection)."
           python3 - <<'PY'
           from pathlib import Path
+          import ast
           import os
 
           test_path = Path("/tmp/staubli_ws/src/staubli_driver_ros2/staubli_moveit_config/test/test_moveit_mock_planning.launch.py")
@@ -572,7 +574,7 @@ jobs:
                   self.assertTrue(wait_for_marker("entered", 20.0), "TEM stopExecution barrier was not entered")
                   self.assertTrue(wait_for_marker("thread_finished", 35.0), "TEM execution thread did not naturally finish")
                   with open(os.path.join(barrier_dir, "release"), "w", encoding="utf-8") as release_file:
-                      release_file.write("release\n")
+                      release_file.write("release\\n")
                   self.assertTrue(wait_for_marker("state", 10.0), "TEM post-barrier state marker was not written")
                   with open(os.path.join(barrier_dir, "state"), encoding="utf-8") as state_file:
                       state_text = state_file.read()
@@ -585,6 +587,7 @@ jobs:
           '''
 
           source = source.replace(shutdown_anchor, "\n\n" + normal_method + "\n\n" + race_method + shutdown_anchor, 1)
+          ast.parse(source, filename=str(test_path))
           test_path.write_text(source)
           print("Added normal mock execution plus deterministic MoveGroup cancel/TEM stop check-lock-recheck test.")
           PY
