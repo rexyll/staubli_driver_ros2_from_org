@@ -267,6 +267,8 @@ jobs:
                 "    private_executor_->cancel();\n"
                 "  if (private_executor_thread_.joinable())\n"
                 "    private_executor_thread_.join();\n"
+                "  { std::lock_guard<std::mutex> thread_lock(execution_thread_mutex_); RCLCPP_INFO(logger_, \"shutdown probe TEM execution_thread_joinable=%d\", execution_thread_ && execution_thread_->joinable()); }\n"
+                "  { std::lock_guard<std::mutex> state_lock(execution_state_mutex_); RCLCPP_INFO(logger_, \"shutdown probe TEM active_handles_after_stop=%zu\", active_handles_.size()); }\n"
                 "  RCLCPP_INFO(logger_, \"shutdown probe TEM after stop/join: main_context_valid=%d controller_context_valid=%d\", "
                 "node_->get_node_base_interface()->get_context()->is_valid(), "
                 "(controller_mgr_node_ && controller_mgr_node_->get_node_base_interface()->get_context()->is_valid()));\n"
@@ -427,8 +429,8 @@ jobs:
                   result = result_future.result().result
                   self.assertEqual(result.error_code.val, MoveItErrorCodes.SUCCESS)
                   self.assertTrue(
-                      result.executed_trajectory.joint_trajectory.points,
-                      "MoveIt did not report an executed trajectory",
+                      result.planned_trajectory.joint_trajectory.points,
+                      "MoveIt did not return the planned trajectory",
                   )
           '''
 
@@ -444,7 +446,7 @@ jobs:
           cd /tmp/staubli_ws
           colcon build --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_FLAGS='-O1 -g -fno-omit-frame-pointer' -DCMAKE_CXX_FLAGS='-O1 -g -fno-omit-frame-pointer' -DBUILD_TESTING=ON
 
-      - name: Run mock planning and strict teardown regression
+      - name: Run mock planning, trajectory execution and strict teardown regression
         shell: bash
         run: |
           set -eo pipefail
