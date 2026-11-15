@@ -358,6 +358,16 @@ jobs:
           git -C /tmp/staubli_ws/src/staubli_driver_ros2 fetch --depth 1 origin 7d9fa0d715db46060199eeca541514ddeed9c4c1
           git -C /tmp/staubli_ws/src/staubli_driver_ros2 checkout --detach FETCH_HEAD
           test "$(git -C /tmp/staubli_ws/src/staubli_driver_ros2 rev-parse HEAD)" = "7d9fa0d715db46060199eeca541514ddeed9c4c1"
+          test_file="$(git -C /tmp/staubli_ws/src/staubli_driver_ros2 ls-files '*test_moveit_mock_planning.launch.py')"
+          test_file_count="$(printf '%s\n' "$test_file" | sed '/^$/d' | wc -l)"
+          test "$test_file_count" -eq 1
+          test_blob="$(git -C /tmp/staubli_ws/src/staubli_driver_ros2 rev-parse "HEAD:$test_file")"
+          test "$test_blob" = "2f23d471e2c2dd6ee9e6e5a9560bac88e5cdf14b"
+          if grep -Eiq 'SwitchController|deactivate_controllers|switch_controller' "/tmp/staubli_ws/src/staubli_driver_ros2/$test_file"; then
+            echo "Unexpected test-side controller-deactivation logic in the PR launch test."
+            exit 1
+          fi
+          echo "Verified PR launch test blob: $test_blob ($test_file); no test-side controller deactivation."
           echo "Using the PR launch test file unchanged; no test-side controller deactivation overlay."
           rosdep install --from-paths /tmp/staubli_ws/src --ignore-src --rosdistro jazzy -y
           cd /tmp/staubli_ws
