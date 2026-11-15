@@ -349,7 +349,7 @@ jobs:
           source = source.replace(include_anchor, include_extra + include_anchor, 1)
 
           function_start = source.index("void TrajectoryExecutionManager::stopExecution(bool auto_clear)")
-          function_end = source.index("\\nvoid TrajectoryExecutionManager::execute(", function_start)
+          function_end = source.index("\nvoid TrajectoryExecutionManager::execute(", function_start)
           stop_function = """void TrajectoryExecutionManager::stopExecution(bool auto_clear)
           {
             bool test_barrier_entered = false;
@@ -420,7 +420,6 @@ jobs:
           }
           source = source[:function_start] + stop_function + source[function_end:]
 
-          thread_end_anchor = "  if (callback)\\n    callback(last_execution_status_);\\n}"
           thread_end_anchor = "  if (callback)\n    callback(last_execution_status_);\n}"
           thread_end_marker = (
               "  if (callback)\n    callback(last_execution_status_);\n"
