@@ -380,7 +380,7 @@ jobs:
           function_start = source.index("void TrajectoryExecutionManager::stopExecution(bool auto_clear)")
           function_end = source.index("\nvoid TrajectoryExecutionManager::execute(", function_start)
           stop_function = source[function_start:function_end]
-          if not stop_function.endswith("\n}"):
+          if not stop_function.rstrip().endswith("}"):
               raise SystemExit("Unexpected stopExecution function tail.")
           state_marker = """
             if (test_barrier_entered)
@@ -394,7 +394,8 @@ jobs:
               marker << "active_handles=" << handle_count << std::endl;
             }
           """
-          stop_function = stop_function[:-2] + state_marker + "\n}"
+          trimmed_stop_function = stop_function.rstrip()
+          stop_function = trimmed_stop_function[:-1] + state_marker + "\n}" + stop_function[len(trimmed_stop_function):]
           source = source[:function_start] + stop_function + source[function_end:]
 
           thread_end_anchor = "  if (callback)\n    callback(last_execution_status_);\n}"
