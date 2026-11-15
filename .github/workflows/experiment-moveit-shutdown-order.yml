@@ -375,7 +375,7 @@ jobs:
           test_path = Path("/tmp/staubli_ws/src/staubli_driver_ros2/staubli_moveit_config/test/test_moveit_mock_planning.launch.py")
           source = test_path.read_text()
 
-          shutdown_anchor = "\\n\\n@launch_testing.post_shutdown_test()\\n"
+          shutdown_anchor = "\n\n@launch_testing.post_shutdown_test()\n"
           method_name = "test_z_move_group_executes_joint_goal_on_mock_controller"
           if source.count(shutdown_anchor) != 1 or method_name in source:
               raise SystemExit("Unexpected launch-test structure; refusing to add execution coverage.")
@@ -434,7 +434,7 @@ jobs:
 
           source = source.replace(
               shutdown_anchor,
-              "\\n\\n" + method + shutdown_anchor,
+              "\n\n" + method + shutdown_anchor,
               1,
           )
           test_path.write_text(source)
