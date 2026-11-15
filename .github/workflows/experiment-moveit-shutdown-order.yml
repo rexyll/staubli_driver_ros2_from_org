@@ -330,6 +330,91 @@ jobs:
           git -C /tmp/moveit_ws/src/moveit2 diff -- moveit_ros/planning/trajectory_execution_manager/src/trajectory_execution_manager.cpp
           git -C /tmp/moveit_ws/src/moveit2 diff -- moveit_ros/planning/trajectory_execution_manager/include/moveit/trajectory_execution_manager/trajectory_execution_manager.hpp
 
+      - name: Add deterministic TEM stopExecution race barrier (CI overlay only)
+        shell: bash
+        run: |
+          set -eo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          tem_path = Path("/tmp/moveit_ws/src/moveit2/moveit_ros/planning/trajectory_execution_manager/src/trajectory_execution_manager.cpp")
+          source = tem_path.read_text()
+          include_anchor = "#include <memory>\\n"
+          include_extra = "#include <chrono>\\n#include <cstdlib>\\n#include <fstream>\\n#include <string>\\n#include <thread>\\n"
+          if source.count(include_anchor) != 1:
+              raise SystemExit("Expected unique TEM standard include anchor.")
+          source = source.replace(include_anchor, include_extra + include_anchor, 1)
+
+          stop_anchor = """void TrajectoryExecutionManager::stopExecution(bool auto_clear)
+{
+  if (!execution_complete_)
+  {
+    execution_state_mutex_.lock();"""
+          stop_replacement = """void TrajectoryExecutionManager::stopExecution(bool auto_clear)
+{
+  bool test_barrier_entered = false;
+  const char* test_barrier_dir = std::getenv("STAUBLI_TEM_STOP_BARRIER_DIR");
+  if (!execution_complete_)
+  {
+    if (test_barrier_dir && *test_barrier_dir)
+    {
+      test_barrier_entered = true;
+      const std::string marker_prefix = std::string(test_barrier_dir) + "/";
+      { std::ofstream marker(marker_prefix + "entered"); marker << 1 << std::endl; }
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(45);
+      bool released = false;
+      while (std::chrono::steady_clock::now() < deadline)
+      {
+        std::ifstream release(marker_prefix + "release");
+        if (release.good()) { released = true; break; }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+      { std::ofstream marker(marker_prefix + "released"); marker << (released ? 1 : 0) << std::endl; }
+    }
+    execution_state_mutex_.lock();"""
+          if source.count(stop_anchor) != 1:
+              raise SystemExit("Expected unique stopExecution first-check anchor.")
+          source = source.replace(stop_anchor, stop_replacement, 1)
+
+          function_start = source.index("void TrajectoryExecutionManager::stopExecution(bool auto_clear)")
+          function_end = source.index("\\nvoid TrajectoryExecutionManager::execute(", function_start)
+          stop_function = source[function_start:function_end]
+          if not stop_function.endswith("\\n}"):
+              raise SystemExit("Unexpected stopExecution function tail.")
+          state_marker = """
+  if (test_barrier_entered)
+  {
+    bool thread_joinable = false;
+    std::size_t handle_count = 0;
+    { std::lock_guard<std::mutex> thread_lock(execution_thread_mutex_); thread_joinable = execution_thread_ && execution_thread_->joinable(); }
+    { std::lock_guard<std::mutex> state_lock(execution_state_mutex_); handle_count = active_handles_.size(); }
+    std::ofstream marker(std::string(test_barrier_dir) + "/state");
+    marker << "execution_thread_joinable=" << (thread_joinable ? 1 : 0) << std::endl;
+    marker << "active_handles=" << handle_count << std::endl;
+  }
+"""
+          stop_function = stop_function[:-2] + state_marker + "\\n}"
+          source = source[:function_start] + stop_function + source[function_end:]
+
+          thread_end_anchor = "  if (callback)\\n    callback(last_execution_status_);\\n}"
+          thread_end_marker = (
+              "  if (callback)\\n    callback(last_execution_status_);\\n"
+              "  if (const char* barrier_dir = std::getenv(\\\"STAUBLI_TEM_STOP_BARRIER_DIR\\\"))\\n"
+              "  {\\n"
+              "    std::ofstream marker(std::string(barrier_dir) + \\\"/thread_finished\\\");\\n"
+              "    marker << 1 << std::endl;\\n"
+              "  }\\n}"
+          )
+          if source.count(thread_end_anchor) != 1:
+              raise SystemExit("Expected unique executeThread completion callback anchor.")
+          source = source.replace(thread_end_anchor, thread_end_marker, 1)
+          if not all(token in source for token in ("STAUBLI_TEM_STOP_BARRIER_DIR", "thread_finished", "execution_thread_joinable=")):
+              raise SystemExit("TEM race-barrier self-validation failed.")
+          tem_path.write_text(source)
+          print("Installed test-only TEM stopExecution barrier and joinable/active-handle state marker.")
+          PY
+
       - name: Install MoveIt source dependencies
         shell: bash
         run: |
@@ -373,24 +458,19 @@ jobs:
           echo "Verified original PR launch-test blob; adding a separate plan-and-execute test overlay (no controller-deactivation injection)."
           python3 - <<'PY'
           from pathlib import Path
+          import os
 
           test_path = Path("/tmp/staubli_ws/src/staubli_driver_ros2/staubli_moveit_config/test/test_moveit_mock_planning.launch.py")
           source = test_path.read_text()
-
-          shutdown_anchor = "\n\n@launch_testing.post_shutdown_test()\n"
-          method_name = "test_z_move_group_executes_joint_goal_on_mock_controller"
-          if source.count(shutdown_anchor) != 1 or method_name in source:
+          shutdown_anchor = "\\n\\n@launch_testing.post_shutdown_test()\\n"
+          if source.count(shutdown_anchor) != 1:
               raise SystemExit("Unexpected launch-test structure; refusing to add execution coverage.")
 
-          method = '''
+          normal_method = '''
               def test_z_move_group_executes_joint_goal_on_mock_controller(self):
-                  """Run a real MoveGroup plan-and-execute request on mock hardware."""
+                  """Run a normal MoveGroup plan-and-execute request on mock hardware."""
                   client = ActionClient(self.node, MoveGroup, "/move_action")
-                  self.assertTrue(
-                      client.wait_for_server(timeout_sec=120.0),
-                      "MoveGroup action server did not become available for execution",
-                  )
-
+                  self.assertTrue(client.wait_for_server(timeout_sec=120.0))
                   goal = MoveGroup.Goal()
                   goal.request.group_name = "arm"
                   goal.request.pipeline_id = "ompl"
@@ -399,7 +479,6 @@ jobs:
                   goal.request.max_velocity_scaling_factor = 0.5
                   goal.request.max_acceleration_scaling_factor = 0.5
                   goal.request.start_state.is_diff = True
-
                   constraints = Constraints()
                   target_positions = (0.11, 0.21, 0.31, 0.41, 0.51, 0.61)
                   for index, position in enumerate(target_positions, start=1):
@@ -411,37 +490,105 @@ jobs:
                       joint.weight = 1.0
                       constraints.joint_constraints.append(joint)
                   goal.request.goal_constraints.append(constraints)
-
                   goal.planning_options.plan_only = False
                   goal.planning_options.replan = False
                   goal.planning_options.look_around = False
-
                   send_future = client.send_goal_async(goal)
                   rclpy.spin_until_future_complete(self.node, send_future, timeout_sec=30.0)
-                  self.assertTrue(send_future.done(), "MoveGroup execution goal submission timed out")
+                  self.assertTrue(send_future.done())
                   goal_handle = send_future.result()
                   self.assertIsNotNone(goal_handle)
-                  self.assertTrue(goal_handle.accepted, "MoveGroup rejected the execution goal")
-
+                  self.assertTrue(goal_handle.accepted)
                   result_future = goal_handle.get_result_async()
                   rclpy.spin_until_future_complete(self.node, result_future, timeout_sec=120.0)
-                  self.assertTrue(result_future.done(), "MoveGroup execution result timed out")
+                  self.assertTrue(result_future.done())
                   result = result_future.result().result
                   self.assertEqual(result.error_code.val, MoveItErrorCodes.SUCCESS)
-                  self.assertTrue(
-                      result.planned_trajectory.joint_trajectory.points,
-                      "MoveIt did not return the planned trajectory",
-                  )
+                  self.assertTrue(result.planned_trajectory.joint_trajectory.points)
           '''
 
-          source = source.replace(
-              shutdown_anchor,
-              "\n\n" + method + shutdown_anchor,
-              1,
-          )
+          race_method = '''
+              def test_zz_move_group_cancel_completion_check_lock_recheck(self):
+                  """Pause stopExecution after its first read, finish the trajectory, then inspect join state."""
+                  barrier_dir = os.environ.get("STAUBLI_TEM_STOP_BARRIER_DIR")
+                  self.assertTrue(barrier_dir, "TEM stop barrier directory was not configured")
+                  os.makedirs(barrier_dir, exist_ok=True)
+                  for marker_name in ("entered", "release", "released", "thread_finished", "state"):
+                      marker_path = os.path.join(barrier_dir, marker_name)
+                      if os.path.exists(marker_path):
+                          os.remove(marker_path)
+
+                  client = ActionClient(self.node, MoveGroup, "/move_action")
+                  self.assertTrue(client.wait_for_server(timeout_sec=120.0))
+                  feedback_state = {"value": ""}
+                  def feedback_callback(message):
+                      feedback_state["value"] = message.feedback.state
+
+                  goal = MoveGroup.Goal()
+                  goal.request.group_name = "arm"
+                  goal.request.pipeline_id = "ompl"
+                  goal.request.allowed_planning_time = 10.0
+                  goal.request.num_planning_attempts = 2
+                  goal.request.max_velocity_scaling_factor = 0.05
+                  goal.request.max_acceleration_scaling_factor = 0.05
+                  goal.request.start_state.is_diff = True
+                  constraints = Constraints()
+                  target_positions = (0.55, 0.40, 0.15, 0.25, 0.35, 0.45)
+                  for index, position in enumerate(target_positions, start=1):
+                      joint = JointConstraint()
+                      joint.joint_name = f"joint_{index}"
+                      joint.position = position
+                      joint.tolerance_above = 0.05
+                      joint.tolerance_below = 0.05
+                      joint.weight = 1.0
+                      constraints.joint_constraints.append(joint)
+                  goal.request.goal_constraints.append(constraints)
+                  goal.planning_options.plan_only = False
+                  goal.planning_options.replan = False
+                  goal.planning_options.look_around = False
+                  send_future = client.send_goal_async(goal, feedback_callback=feedback_callback)
+                  rclpy.spin_until_future_complete(self.node, send_future, timeout_sec=30.0)
+                  self.assertTrue(send_future.done())
+                  goal_handle = send_future.result()
+                  self.assertIsNotNone(goal_handle)
+                  self.assertTrue(goal_handle.accepted)
+
+                  monitor_deadline = time.monotonic() + 60.0
+                  while time.monotonic() < monitor_deadline and feedback_state["value"] != "MONITOR":
+                      rclpy.spin_once(self.node, timeout_sec=0.1)
+                  self.assertEqual(feedback_state["value"], "MONITOR", "MoveGroup never entered MONITOR state")
+                  time.sleep(0.2)
+                  cancel_future = goal_handle.cancel_goal_async()
+                  rclpy.spin_until_future_complete(self.node, cancel_future, timeout_sec=15.0)
+                  self.assertTrue(cancel_future.done(), "MoveGroup cancel request timed out")
+
+                  def wait_for_marker(name, timeout_sec):
+                      marker_path = os.path.join(barrier_dir, name)
+                      deadline = time.monotonic() + timeout_sec
+                      while time.monotonic() < deadline and not os.path.exists(marker_path):
+                          rclpy.spin_once(self.node, timeout_sec=0.1)
+                      return os.path.exists(marker_path)
+
+                  self.assertTrue(wait_for_marker("entered", 20.0), "TEM stopExecution barrier was not entered")
+                  self.assertTrue(wait_for_marker("thread_finished", 35.0), "TEM execution thread did not naturally finish")
+                  with open(os.path.join(barrier_dir, "release"), "w", encoding="utf-8") as release_file:
+                      release_file.write("release\\n")
+                  self.assertTrue(wait_for_marker("state", 10.0), "TEM post-barrier state marker was not written")
+                  with open(os.path.join(barrier_dir, "state"), encoding="utf-8") as state_file:
+                      state_text = state_file.read()
+                  self.assertIn("execution_thread_joinable=1", state_text, state_text)
+                  self.assertIn("active_handles=0", state_text, state_text)
+                  result_future = goal_handle.get_result_async()
+                  rclpy.spin_until_future_complete(self.node, result_future, timeout_sec=30.0)
+                  self.assertTrue(result_future.done(), "Preempted MoveGroup action result timed out")
+                  self.assertEqual(result_future.result().result.error_code.val, MoveItErrorCodes.PREEMPTED)
+          '''
+
+          source = source.replace(shutdown_anchor, "\\n\\n" + normal_method + "\\n\\n" + race_method + shutdown_anchor, 1)
           test_path.write_text(source)
-          print("Added isolated plan_only=False execution coverage after the original PR blob SHA check.")
+          print("Added normal mock execution plus deterministic MoveGroup cancel/TEM stop check-lock-recheck test.")
           PY
+
           rosdep install --from-paths /tmp/staubli_ws/src --ignore-src --rosdistro jazzy -y
           cd /tmp/staubli_ws
           colcon build --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_FLAGS='-O1 -g -fno-omit-frame-pointer' -DCMAKE_CXX_FLAGS='-O1 -g -fno-omit-frame-pointer' -DBUILD_TESTING=ON
@@ -461,6 +608,9 @@ jobs:
           failures=0
           for iteration in 1 2 3 4 5; do
             echo "=== Mock planning + trajectory execution + teardown repetition ${iteration}/5 ==="
+            export STAUBLI_TEM_STOP_BARRIER_DIR="/tmp/staubli_tem_barrier_${iteration}"
+            rm -rf "${STAUBLI_TEM_STOP_BARRIER_DIR}"
+            mkdir -p "${STAUBLI_TEM_STOP_BARRIER_DIR}"
             set +e
             colcon test --packages-select staubli_moveit_config --event-handlers console_direct+ --return-code-on-test-failure
             test_rc=$?
@@ -485,4 +635,5 @@ jobs:
             /tmp/rclcpp_ws/log
             /tmp/moveit_ws/log
             /tmp/staubli_ws/log
+            /tmp/staubli_tem_barrier_*
           if-no-files-found: ignore
