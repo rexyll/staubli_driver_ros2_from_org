@@ -125,14 +125,14 @@ jobs:
               raise SystemExit("Expected exactly one upstream rclcpp::shutdown anchor.")
           if "sigwait(" in source or "SignalHandlerOptions::None" in source:
               raise SystemExit("Unexpected custom signal handling in upstream baseline.")
-          shutdown_anchor = "    rclcpp::shutdown();"
+          shutdown_anchor = "\n\n@launch_testing.post_shutdown_test()\n"
           if source.count(shutdown_anchor) != 1:
               raise SystemExit("Expected exactly one upstream rclcpp::shutdown call.")
           insertion = """    RCLCPP_INFO(nh->get_logger(), "shutdown A/B: stopping PSM scene publisher before Context shutdown");
               planning_scene_monitor->stopPublishingPlanningScene();
               RCLCPP_INFO(nh->get_logger(), "shutdown A/B: PSM scene publisher stopped and joined");
           """
-          source = source.replace(shutdown_anchor, insertion + shutdown_anchor, 1)
+          source = source.replace(shutdown_anchor, "\n\n" + normal_method + "\n\n" + race_method + shutdown_anchor, 1)
           if source.count("planning_scene_monitor->stopPublishingScene();") != 0:
               raise SystemExit("Unexpected alternate PSM shutdown anchor.")
           # Keep the main node and MoveItCpp alive only until MoveGroupExe clears
@@ -340,8 +340,8 @@ jobs:
 
           tem_path = Path("/tmp/moveit_ws/src/moveit2/moveit_ros/planning/trajectory_execution_manager/src/trajectory_execution_manager.cpp")
           source = tem_path.read_text()
-          include_anchor = "#include <memory>\\n"
-          include_extra = "#include <chrono>\\n#include <cstdlib>\\n#include <fstream>\\n#include <string>\\n#include <thread>\\n"
+          include_anchor = "#include <memory>\n"
+          include_extra = "#include <chrono>\n#include <cstdlib>\n#include <fstream>\n#include <string>\n#include <thread>\n"
           if source.count(include_anchor) != 1:
               raise SystemExit("Expected unique TEM standard include anchor.")
           source = source.replace(include_anchor, include_extra + include_anchor, 1)
@@ -354,14 +354,14 @@ jobs:
           stop_replacement = """void TrajectoryExecutionManager::stopExecution(bool auto_clear)
 {
   bool test_barrier_entered = false;
-  const char* test_barrier_dir = std::getenv("STAUBLI_TEM_STOP_BARRIER_DIR");
+              "  if (const char* barrier_dir = std::getenv(\"STAUBLI_TEM_STOP_BARRIER_DIR\"))\n"
   if (!execution_complete_)
   {
     if (test_barrier_dir && *test_barrier_dir)
     {
       test_barrier_entered = true;
       const std::string marker_prefix = std::string(test_barrier_dir) + "/";
-      { std::ofstream marker(marker_prefix + "entered"); marker << 1 << std::endl; }
+              "    marker << 1 << std::endl;\n"
       const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(45);
       bool released = false;
       while (std::chrono::steady_clock::now() < deadline)
@@ -378,9 +378,9 @@ jobs:
           source = source.replace(stop_anchor, stop_replacement, 1)
 
           function_start = source.index("void TrajectoryExecutionManager::stopExecution(bool auto_clear)")
-          function_end = source.index("\\nvoid TrajectoryExecutionManager::execute(", function_start)
+          function_end = source.index("\nvoid TrajectoryExecutionManager::execute(", function_start)
           stop_function = source[function_start:function_end]
-          if not stop_function.endswith("\\n}"):
+          if not stop_function.endswith("\n}"):
               raise SystemExit("Unexpected stopExecution function tail.")
           state_marker = """
   if (test_barrier_entered)
@@ -394,17 +394,17 @@ jobs:
     marker << "active_handles=" << handle_count << std::endl;
   }
 """
-          stop_function = stop_function[:-2] + state_marker + "\\n}"
+          stop_function = stop_function[:-2] + state_marker + "\n}"
           source = source[:function_start] + stop_function + source[function_end:]
 
-          thread_end_anchor = "  if (callback)\\n    callback(last_execution_status_);\\n}"
+              "  if (callback)\n    callback(last_execution_status_);\n"
           thread_end_marker = (
               "  if (callback)\\n    callback(last_execution_status_);\\n"
               "  if (const char* barrier_dir = std::getenv(\\\"STAUBLI_TEM_STOP_BARRIER_DIR\\\"))\\n"
               "  {\\n"
-              "    std::ofstream marker(std::string(barrier_dir) + \\\"/thread_finished\\\");\\n"
+              "    std::ofstream marker(std::string(barrier_dir) + \"/thread_finished\");\n"
               "    marker << 1 << std::endl;\\n"
-              "  }\\n}"
+              "  }\n}"
           )
           if source.count(thread_end_anchor) != 1:
               raise SystemExit("Expected unique executeThread completion callback anchor.")
@@ -572,7 +572,7 @@ jobs:
                   self.assertTrue(wait_for_marker("entered", 20.0), "TEM stopExecution barrier was not entered")
                   self.assertTrue(wait_for_marker("thread_finished", 35.0), "TEM execution thread did not naturally finish")
                   with open(os.path.join(barrier_dir, "release"), "w", encoding="utf-8") as release_file:
-                      release_file.write("release\\n")
+                      release_file.write("release\n")
                   self.assertTrue(wait_for_marker("state", 10.0), "TEM post-barrier state marker was not written")
                   with open(os.path.join(barrier_dir, "state"), encoding="utf-8") as state_file:
                       state_text = state_file.read()
