@@ -90,7 +90,7 @@ jobs:
           # MoveGroupExe/executor block. This weak probe does not add an owner.
           source = source.replace(
               psm_anchor,
-              psm_anchor + "\\n  const auto planning_scene_monitor_lifetime = std::weak_ptr(planning_scene_monitor);",
+              psm_anchor + "\n  const auto planning_scene_monitor_lifetime = std::weak_ptr(planning_scene_monitor);",
               1,
           )
           source = source.replace(
@@ -100,23 +100,27 @@ jobs:
                   nh.reset();""",
               1,
           )
-          after_scope_anchor = """  else
-    RCLCPP_ERROR(nh->get_logger(), "Planning scene not configured");
-
-  return 0;"""
-          after_scope_probe = """  else
-    RCLCPP_ERROR(nh->get_logger(), "Planning scene not configured");
-
-  if (planning_scene_monitor_lifetime.expired()) {
-    std::fprintf(stderr, "[OWNER] PSM unexpectedly expired before main() return\\n");
-    std::fflush(stderr);
-    return 2;
-  }
-  std::fprintf(stderr, "[OWNER] PSM retained after MoveGroupExe/executor scope; use_count=%ld\\n",
-    planning_scene_monitor_lifetime.use_count());
-  std::fflush(stderr);
-
-  return 0;"""
+          after_scope_anchor = (
+              "  else\n"
+              "    RCLCPP_ERROR(nh->get_logger(), \"Planning scene not configured\");\n"
+              "\n"
+              "  return 0;"
+          )
+          after_scope_probe = (
+              "  else\n"
+              "    RCLCPP_ERROR(nh->get_logger(), \"Planning scene not configured\");\n"
+              "\n"
+              "  if (planning_scene_monitor_lifetime.expired()) {\n"
+              "    std::fprintf(stderr, \"[OWNER] PSM unexpectedly expired before main() return\\\\n\");\n"
+              "    std::fflush(stderr);\n"
+              "    return 2;\n"
+              "  }\n"
+              "  std::fprintf(stderr, \"[OWNER] PSM retained after MoveGroupExe/executor scope; use_count=%ld\\\\n\",\n"
+              "    planning_scene_monitor_lifetime.use_count());\n"
+              "  std::fflush(stderr);\n"
+              "\n"
+              "  return 0;"
+          )
           if source.count(after_scope_anchor) != 1:
               raise SystemExit("Expected exactly one post-MoveGroupExe scope anchor for PSM weak probe.")
           source = source.replace(after_scope_anchor, after_scope_probe, 1)
