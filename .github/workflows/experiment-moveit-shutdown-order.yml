@@ -511,6 +511,10 @@ jobs:
           source /tmp/moveit_ws/install/setup.bash
           source /tmp/staubli_ws/install/setup.bash
           unset LD_PRELOAD ASAN_OPTIONS
+          # Run move_group under batch GDB so the reproducible PSM pnode_/NodeBase/
+          # CallbackGroup crash records the faulting PC, loaded DSOs, process mappings,
+          # registers and full stack. This is diagnostic-only; it does not change source.
+          export STAUBLI_MOVE_GROUP_GDB_PREFIX='gdb --quiet --batch -ex "set pagination off" -ex "set confirm off" -ex "set debuginfod enabled off" -ex "handle SIGINT nostop noprint pass" -ex "run" -ex "bt full" -ex "info sharedlibrary" -ex "info proc mappings" -ex "info registers" -ex "x/8i $pc" --args'
           cd /tmp/staubli_ws
           package_prefix="$(ros2 pkg prefix staubli_moveit_config)"
           test -d "$package_prefix"
@@ -521,7 +525,7 @@ jobs:
             exit 1
           fi
           echo "Test workspace preflight passed: package=staubli_moveit_config prefix=$package_prefix; rclcpp source pristine."
-          echo "Running A-PSM-retained treatment with stock rclcpp runtime semantics."
+          echo "Running A-PSM-retained treatment with stock rclcpp runtime semantics; move_group wrapped in batch GDB."
           failures=0
           for iteration in $(seq 1 10); do
             echo "=== A-PSM-retained + K + B-core clean repetition $iteration/10 ==="
