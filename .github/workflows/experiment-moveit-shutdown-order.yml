@@ -511,10 +511,49 @@ jobs:
           source /tmp/moveit_ws/install/setup.bash
           source /tmp/staubli_ws/install/setup.bash
           unset LD_PRELOAD ASAN_OPTIONS
-          # Run move_group under batch GDB so the reproducible PSM pnode_/NodeBase/
-          # CallbackGroup crash records the faulting PC, loaded DSOs, process mappings,
-          # registers and full stack. This is diagnostic-only; it does not change source.
-          export STAUBLI_MOVE_GROUP_GDB_PREFIX='gdb --quiet --batch -ex "set pagination off" -ex "set confirm off" -ex "set debuginfod enabled off" -ex "handle SIGINT nostop noprint pass" -ex "run" -ex "bt full" -ex "info sharedlibrary" -ex "info proc mappings" -ex "info registers" -ex "x/8i $pc" --args'
+          # Capture DSO unload events, then inspect each CallbackGroup weak ServiceBase
+          # control block at the reproducible pnode_ teardown SIGSEGV.
+          # This is diagnostic-only; it does not change MoveIt/rclcpp/driver source.
+          cat > /tmp/staubli-move-group.gdb <<'GDB'
+          set pagination off
+          set confirm off
+          set debuginfod enabled off
+          set print pretty on
+          handle SIGINT nostop noprint pass
+          handle SIGSEGV stop print nopass
+          catch unload
+          commands
+            silent
+            printf "[GDB-SO-UNLOAD] shared-library unload event\\n"
+            info sharedlibrary
+            bt 5
+            continue
+          end
+          run
+          info program
+          bt full
+          info sharedlibrary
+          info proc mappings
+          info registers
+          info symbol $rax
+          x/8gx $rax
+          x/8gx $rdi
+          frame 10
+          info args
+          p this->service_ptrs_.size()
+          p this->service_ptrs_
+          set $i = 0
+          while $i < this->service_ptrs_.size()
+            set $cb = this->service_ptrs_[$i]._M_refcount._M_pi
+            printf "[GDB-WEAK] index=%d object=%p control=%p\\n", $i, this->service_ptrs_[$i]._M_ptr, $cb
+            x/4gx $cb
+            info symbol *(void **)$cb
+            set $i = $i + 1
+          end
+          frame 0
+          x/8i $pc
+          GDB
+          export STAUBLI_MOVE_GROUP_GDB_PREFIX='gdb --quiet --batch -x /tmp/staubli-move-group.gdb --args'
           cd /tmp/staubli_ws
           package_prefix="$(ros2 pkg prefix staubli_moveit_config)"
           test -d "$package_prefix"
@@ -540,11 +579,15 @@ jobs:
             result_rc=$?
             set -e
             set +e
-            python3 - "$output_log" <<'PY'
+            python3 - "$output_log" "$result_log" <<'PY'
           from pathlib import Path
           import sys
 
           lines = Path(sys.argv[1]).read_text(errors="replace").splitlines()
+          result_lines = Path(sys.argv[2]).read_text(errors="replace").splitlines()
+          sigsegv = [line for line in lines if "received signal SIGSEGV" in line]
+          if sigsegv:
+              raise SystemExit(f"move_group received SIGSEGV under GDB: {sigsegv[0]}")
           markers = [
               "shutdown core-B: private executor reset BEGIN",
               "shutdown core-B: private executor node removed",
@@ -574,9 +617,10 @@ jobs:
           launch_tests = sum("Ran 1 test in" in line for line in lines)
           if launch_tests != 1:
               raise SystemExit(f"Expected one launch test execution, observed {launch_tests}")
+          # colcon test-result writes the aggregate summary to result_log, not output_log.
           passing_summaries = sum(
               "Summary: 7 tests, 0 errors, 0 failures, 0 skipped" in line
-              for line in lines
+              for line in result_lines
           )
           if passing_summaries != 1:
               raise SystemExit(f"Expected one clean 7-test summary, observed {passing_summaries}")
