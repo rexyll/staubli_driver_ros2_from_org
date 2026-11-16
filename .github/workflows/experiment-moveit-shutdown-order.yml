@@ -686,13 +686,19 @@ jobs:
           break /tmp/rclcpp_ws/src/rclcpp/rclcpp/src/rclcpp/node_interfaces/node_services.cpp:29
           commands
             silent
-            printf "[GDB-SERVICE-OWNER] node_base=%p service=%p name=%s\n", node_base_, service_base_ptr._M_ptr, service_base_ptr._M_ptr->get_service_name()
+            set $service_control = service_base_ptr._M_refcount._M_pi
+            set $service_vptr = *(void **)$service_control
+            printf "[GDB-SERVICE-OWNER] node_base=%p service=%p name=%s control=%p vptr=%p\n", node_base_, service_base_ptr._M_ptr, service_base_ptr._M_ptr->get_service_name(), $service_control, $service_vptr
+            info symbol $service_vptr
             continue
           end
           break /tmp/rclcpp_ws/src/rclcpp/rclcpp/src/rclcpp/callback_group.cpp:179
           commands
             silent
-            printf "[GDB-CBG-SERVICE-ADD] group=%p service=%p name=%s\n", this, service_ptr._M_ptr, service_ptr._M_ptr->get_service_name()
+            set $group_service_control = service_ptr._M_refcount._M_pi
+            set $group_service_vptr = *(void **)$group_service_control
+            printf "[GDB-CBG-SERVICE-ADD] group=%p service=%p name=%s control=%p vptr=%p\n", this, service_ptr._M_ptr, service_ptr._M_ptr->get_service_name(), $group_service_control, $group_service_vptr
+            info symbol $group_service_vptr
             continue
           end
 
