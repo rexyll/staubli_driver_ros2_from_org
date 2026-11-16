@@ -107,7 +107,7 @@ jobs:
           terminate_service_anchor = "  auto moveit_cpp = std::make_shared<moveit_cpp::MoveItCpp>(nh, moveit_cpp_options);\n"
           if source.count(terminate_service_anchor) != 1:
               raise SystemExit("Expected unique MoveItCpp main() owner for terminate-probe service.")
-          terminate_service_patch = """  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr staubli_terminate_probe_service;
+          terminate_service_patch = '''  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr staubli_terminate_probe_service;
           const char* staubli_terminate_probe_env = std::getenv("STAUBLI_TERMINATE_PROBE");
           if (staubli_terminate_probe_env != nullptr && staubli_terminate_probe_env[0] == '1' &&
               staubli_terminate_probe_env[1] == '\\0')
@@ -136,6 +136,7 @@ jobs:
                   std::fflush(stderr);
                 });
           }
+          '''
           source = source.replace(
               terminate_service_anchor,
               terminate_service_anchor + terminate_service_patch,
