@@ -519,37 +519,97 @@ jobs:
           set confirm off
           set debuginfod enabled off
           set print pretty on
+          set breakpoint pending on
           handle SIGINT nostop noprint pass
           handle SIGSEGV stop print nopass
-          catch unload
+
+          # Record the exact DSO path before GDB removes its objfile on dlclose.
+          python
+          import gdb
+          def _staubli_on_free_objfile(event):
+              try:
+                  gdb.write("[GDB-DL-CLOSE] %s\n" % event.objfile.filename)
+              except Exception as exc:
+                  gdb.write("[GDB-DL-CLOSE-ERROR] %s\n" % exc)
+          try:
+              gdb.events.free_objfile.connect(_staubli_on_free_objfile)
+          except Exception as exc:
+              gdb.write("[GDB-DL-CLOSE-HOOK-ERROR] %s\n" % exc)
+          end
+
+          # Correlate service creation with its owning NodeBase and actual CallbackGroup.
+          break /tmp/rclcpp_ws/src/rclcpp/rclcpp/src/rclcpp/node_interfaces/node_services.cpp:29
           commands
             silent
-            printf "[GDB-SO-UNLOAD] shared-library unload event\\n"
-            info sharedlibrary
-            bt 5
+            printf "[GDB-SERVICE-OWNER] node_base=%p service=%p name=%s\n", node_base_, service_base_ptr._M_ptr, service_base_ptr._M_ptr->get_service_name()
             continue
           end
+          break /tmp/rclcpp_ws/src/rclcpp/rclcpp/src/rclcpp/callback_group.cpp:179
+          commands
+            silent
+            printf "[GDB-CBG-SERVICE-ADD] group=%p service=%p name=%s\n", this, service_ptr._M_ptr, service_ptr._M_ptr->get_service_name()
+            continue
+          end
+
           run
           info program
           bt full
           info sharedlibrary
           info proc mappings
           info registers
-          info symbol $rax
-          x/8gx $rax
-          x/8gx $rdi
+
+          # Preserve registers from the crashing frame. Do not dereference $rax:
+          # it is the invalid vptr target and the previous script stopped here.
+          frame 0
+          set $fault_pc = $pc
+          set $fault_rax = $rax
+          set $fault_cb = $rdi
+          printf "[GDB-FAULT] pc=%p rax=%p control_block=%p\n", $fault_pc, $fault_rax, $fault_cb
+          set $fault_vptr = *(void **)$fault_cb
+          printf "[GDB-FAULT-CONTROL] control_block=%p vptr=%p\n", $fault_cb, $fault_vptr
+          info symbol $fault_vptr
+          x/4gx $fault_cb
+
+          # Identify the exact CallbackGroup whose weak ServiceBase entry is dying.
           frame 10
           info args
-          p this->service_ptrs_.size()
-          p this->service_ptrs_
+          set $crash_group = this
+          set $service_count = this->service_ptrs_.size()
+          printf "[GDB-GROUP] callback_group=%p service_count=%ld\n", $crash_group, (long)$service_count
           set $i = 0
-          while $i < this->service_ptrs_.size()
+          while $i < $service_count
+            set $weak_object = this->service_ptrs_[$i]._M_ptr
             set $cb = this->service_ptrs_[$i]._M_refcount._M_pi
-            printf "[GDB-WEAK] index=%d object=%p control=%p\\n", $i, this->service_ptrs_[$i]._M_ptr, $cb
-            x/4gx $cb
-            info symbol *(void **)$cb
+            printf "[GDB-WEAK] index=%d object=%p control=%p\n", $i, $weak_object, $cb
+            if $cb != 0
+              set $entry_vptr = *(void **)$cb
+              printf "[GDB-WEAK-CONTROL] index=%d vptr=%p\n", $i, $entry_vptr
+              info symbol $entry_vptr
+            else
+              printf "[GDB-WEAK-CONTROL] index=%d null-control-block\n", $i
+            end
             set $i = $i + 1
           end
+
+          # Map the dying Node to PSM node_, pnode_, or the TF listener's private Node.
+          frame 24
+          set $destroying_node = this
+          set $destroying_node_base = this->node_base_._M_ptr
+          printf "[GDB-NODE-DTOR] node=%p node_base=%p\n", $destroying_node, $destroying_node_base
+          frame 30
+          set $psm_node = this->node_._M_ptr
+          set $psm_pnode = this->pnode_._M_ptr
+          set $psm_tf_listener = this->tf_listener_._M_ptr
+          printf "[GDB-PSM-NODES] node=%p pnode=%p tf_listener=%p\n", $psm_node, $psm_pnode, $psm_tf_listener
+          python
+          try:
+              tf_node = gdb.parse_and_eval("this->tf_listener_._M_ptr->optional_default_node_._M_ptr")
+              gdb.write("[GDB-TF-DEFAULT-NODE] %s\n" % tf_node)
+          except Exception as exc:
+              gdb.write("[GDB-TF-DEFAULT-NODE-UNAVAILABLE] %s\n" % exc)
+          end
+          printf "[GDB-NODE-MATCH] dying=%p is_psm_node=%d is_pnode=%d\n", $destroying_node, $destroying_node == $psm_node, $destroying_node == $psm_pnode
+
           frame 0
           x/8i $pc
           GDB
