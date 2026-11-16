@@ -536,7 +536,39 @@ jobs:
           # Record the exact DSO path before GDB removes its objfile on dlclose.
           python
           import gdb
+          import re
           sequence_capability_ranges = []
+
+          def _staubli_capture_sequence_sections():
+              try:
+                  output = gdb.execute("maintenance info sections ALLOBJ", to_string=True)
+                  active_objfile = None
+                  path_suffix = "libsequence_capability.so"
+                  section_re = re.compile(
+                      r"\\s*0x([0-9a-fA-F]+)\\s*->\\s*0x([0-9a-fA-F]+)"
+                      r"\\s+at\\s+0x[0-9a-fA-F]+\\s*:\\s*(\\S+)\\s+(.*)"
+                  )
+                  for line in output.splitlines():
+                      obj_match = re.match(r"\\s*Object file:\\s*(.*)", line)
+                      if obj_match:
+                          active_objfile = obj_match.group(1).strip()
+                          continue
+                      if active_objfile and active_objfile.endswith(path_suffix):
+                          match = section_re.match(line)
+                          if match:
+                              start = int(match.group(1), 16)
+                              end = int(match.group(2), 16)
+                              name = match.group(3)
+                              if start < end:
+                                  sequence_capability_ranges.append((start, end, name))
+                                  gdb.write(
+                                      "[GDB-DL-SECTION] section=%s start=0x%x end=0x%x\\n"
+                                      % (name, start, end)
+                                  )
+                  if not sequence_capability_ranges:
+                      gdb.write("[GDB-DL-SECTION-ERROR] no sequence capability sections parsed\\n")
+              except Exception as exc:
+                  gdb.write("[GDB-DL-SECTION-ERROR] %s\\n" % exc)
 
           def _staubli_on_new_objfile(event):
               try:
@@ -544,16 +576,7 @@ jobs:
                   filename = obj.filename or ""
                   if filename.endswith("libsequence_capability.so"):
                       gdb.write("[GDB-DL-OPEN] %s\\n" % filename)
-                      for section in obj.sections():
-                          start = int(section.start)
-                          end = int(section.end)
-                          name = section.name
-                          if start < end:
-                              sequence_capability_ranges.append((start, end, name))
-                          gdb.write(
-                              "[GDB-DL-SECTION] section=%s start=0x%x end=0x%x\\n"
-                              % (name, start, end)
-                          )
+                      _staubli_capture_sequence_sections()
               except Exception as exc:
                   gdb.write("[GDB-DL-OPEN-ERROR] %s\\n" % exc)
 
@@ -603,6 +626,26 @@ jobs:
           set $fault_vptr = *(void **)$fault_cb
           printf "[GDB-FAULT-CONTROL] control_block=%p vptr=%p\n", $fault_cb, $fault_vptr
           info symbol $fault_vptr
+          python
+          import gdb
+          fault_vptr = int(gdb.parse_and_eval("$fault_vptr"))
+          matches = [
+              (name, start, end)
+              for start, end, name in sequence_capability_ranges
+              if start <= fault_vptr < end
+          ]
+          if matches:
+              for name, start, end in matches:
+                  gdb.write(
+                      "[GDB-VPTR-DSO-MATCH] vptr=0x%x section=%s range=[0x%x,0x%x)\\n"
+                      % (fault_vptr, name, start, end)
+                  )
+          else:
+              gdb.write(
+                  "[GDB-VPTR-DSO-NO-MATCH] vptr=0x%x sequence_capability_sections=%d\\n"
+                  % (fault_vptr, len(sequence_capability_ranges))
+              )
+          end
           python
           import gdb
           fault_vptr = int(gdb.parse_and_eval("$fault_vptr"))
