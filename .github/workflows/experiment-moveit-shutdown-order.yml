@@ -75,7 +75,8 @@ jobs:
           if source.count("planning_scene_monitor->stopPublishingPlanningScene();") != 1:
               raise SystemExit("K PSM publisher stop patch validation failed.")
 
-          # A=ON: release main() PSM, MoveItCpp and node owners after Context shutdown.
+          # A-PSM-retained: keep the main() PSM alias alive beyond MoveGroupExe/executor scope;
+          # continue dropping the main() MoveItCpp and node owners after Context shutdown.
           moveit_cpp_anchor = "  const auto moveit_cpp = std::make_shared<moveit_cpp::MoveItCpp>(nh, moveit_cpp_options);"
           psm_anchor = "  const auto planning_scene_monitor = moveit_cpp->getPlanningSceneMonitorNonConst();"
           if source.count(moveit_cpp_anchor) != 1 or source.count(psm_anchor) != 1:
@@ -85,26 +86,48 @@ jobs:
               "  auto moveit_cpp = std::make_shared<moveit_cpp::MoveItCpp>(nh, moveit_cpp_options);",
               1,
           )
+          # Keep the PSM alias const and retain its strong owner through the
+          # MoveGroupExe/executor block. This weak probe does not add an owner.
           source = source.replace(
               psm_anchor,
-              "  auto planning_scene_monitor = moveit_cpp->getPlanningSceneMonitorNonConst();",
+              psm_anchor + "\\n  const auto planning_scene_monitor_lifetime = std::weak_ptr(planning_scene_monitor);",
               1,
           )
           source = source.replace(
               "    rclcpp::shutdown();",
               """    rclcpp::shutdown();
-                  planning_scene_monitor.reset();
                   moveit_cpp.reset();
                   nh.reset();""",
               1,
           )
+          after_scope_anchor = """  else
+    RCLCPP_ERROR(nh->get_logger(), "Planning scene not configured");
+
+  return 0;"""
+          after_scope_probe = """  else
+    RCLCPP_ERROR(nh->get_logger(), "Planning scene not configured");
+
+  if (planning_scene_monitor_lifetime.expired()) {
+    std::fprintf(stderr, "[OWNER] PSM unexpectedly expired before main() return\\n");
+    std::fflush(stderr);
+    return 2;
+  }
+  std::fprintf(stderr, "[OWNER] PSM retained after MoveGroupExe/executor scope; use_count=%ld\\n",
+    planning_scene_monitor_lifetime.use_count());
+  std::fflush(stderr);
+
+  return 0;"""
+          if source.count(after_scope_anchor) != 1:
+              raise SystemExit("Expected exactly one post-MoveGroupExe scope anchor for PSM weak probe.")
+          source = source.replace(after_scope_anchor, after_scope_probe, 1)
           if not (
-              source.index("rclcpp::shutdown();")
-              < source.index("planning_scene_monitor.reset();")
-              < source.index("moveit_cpp.reset();")
-              < source.index("nh.reset();")
+              "planning_scene_monitor.reset();" not in source
+              and "moveit_cpp.reset();" in source
+              and "nh.reset();" in source
+              and "planning_scene_monitor_lifetime.expired()" in source
+              and "[OWNER] PSM retained after MoveGroupExe/executor scope" in source
           ):
-              raise SystemExit("A main() owner reset order validation failed.")
+              raise SystemExit("A-PSM-retained owner treatment / weak-lifetime probe validation failed.")
 
           # Keep K executor/capability scope order: executor WaitSet is destroyed
           # before MoveGroupExe capability plugins and their loader.
@@ -239,15 +262,16 @@ jobs:
               raise SystemExit("Stock rclcpp unexpectedly contains CI lifecycle instrumentation.")
 
           if not (
-              "planning_scene_monitor.reset();" in source
+              "planning_scene_monitor.reset();" not in source
               and "moveit_cpp.reset();" in source
               and "nh.reset();" in source
+              and "planning_scene_monitor_lifetime" in source
               and "private_executor_.reset();" in tem_source
               and "controller_mgr_node_.reset();" in tem_source
               and "controller_manager_loader_.reset();" in tem_source
           ):
-              raise SystemExit("A+K+B-core final static validation failed.")
-          print("Applied A=ON, fixed K background, and B core cleanup only; event cleanup remains unmodified.")
+              raise SystemExit("A-PSM-retained + K + B-core final static validation failed.")
+          print("Applied A-PSM-retained (MoveItCpp/Node owners dropped), fixed K, and B-core cleanup; PSM weak-lifetime probe enabled.")
           PY
           git -C /tmp/moveit_ws/src/moveit2 diff --check
           git -C /tmp/moveit_ws/src/moveit2 diff -- moveit_ros/move_group/src/move_group.cpp
@@ -370,7 +394,7 @@ jobs:
           cd /tmp/staubli_ws
           colcon build --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_FLAGS='-O1 -g -fno-omit-frame-pointer' -DCMAKE_CXX_FLAGS='-O1 -g -fno-omit-frame-pointer' -DBUILD_TESTING=ON
 
-      - name: Run uninstrumented A+K+B-core mock teardown regression (10 repetitions)
+      - name: Run uninstrumented A-PSM-retained + K + B-core mock teardown regression (10 repetitions)
         shell: bash
         run: |
           set -eo pipefail
@@ -389,11 +413,11 @@ jobs:
             exit 1
           fi
           echo "Test workspace preflight passed: package=staubli_moveit_config prefix=$package_prefix; rclcpp source pristine."
-          echo "Running A+K+B-core cleanup treatment with stock rclcpp runtime semantics."
+          echo "Running A-PSM-retained treatment with stock rclcpp runtime semantics."
           failures=0
           for iteration in $(seq 1 10); do
-            echo "=== A+K+B-core clean repetition $iteration/10 ==="
-            output_log="/tmp/staubli_ws/a-k-b-core-clean-$iteration.log"
+            echo "=== A-PSM-retained + K + B-core clean repetition $iteration/10 ==="
+            output_log="/tmp/staubli_ws/a-psm-retained-k-b-core-clean-$iteration.log"
             set +e
             colcon test --packages-select staubli_moveit_config --event-handlers console_direct+ --return-code-on-test-failure 2>&1 | tee "$output_log"
             test_rc=$?
@@ -443,6 +467,15 @@ jobs:
           )
           if passing_summaries != 1:
               raise SystemExit(f"Expected one clean 7-test summary, observed {passing_summaries}")
+          psm_retained = [
+              line for line in lines
+              if "[OWNER] PSM retained after MoveGroupExe/executor scope" in line
+          ]
+          if len(psm_retained) != 1:
+              raise SystemExit(f"Expected exactly one PSM-retained weak-owner marker, observed {len(psm_retained)}")
+          if not any("use_count=" in line for line in psm_retained):
+              raise SystemExit("PSM-retained marker did not report weak_ptr use_count.")
+
           if any(
               "Segmentation fault" in line or "exit code -11" in line
               for line in lines
@@ -454,19 +487,19 @@ jobs:
           ):
               raise SystemExit("Post-shutdown process-exit assertion failed.")
           print(
-              "Uninstrumented B-core order verified; one mock execution succeeded; "
+              "Uninstrumented A-PSM-retained / B-core order verified; one mock execution succeeded; "
               "one launch test and all seven test assertions passed."
           )
           PY
             order_rc=$?
             set -e
-            echo "=== Clean repetition $iteration/10 exit summary: colcon_test=$test_rc, test_result=$result_rc, lifecycle_order=$order_rc ==="
+            echo "=== A-PSM-retained repetition $iteration/10 exit summary: colcon_test=$test_rc, test_result=$result_rc, lifecycle_order=$order_rc ==="
             if [ "$test_rc" -ne 0 ] || [ "$result_rc" -ne 0 ] || [ "$order_rc" -ne 0 ]; then
               failures=$((failures + 1))
               echo "Clean repetition $iteration/10 failed acceptance."
             fi
           done
-          echo "=== A+K+B-core uninstrumented complete: failures=$failures/10 ==="
+          echo "=== A-PSM-retained + K + B-core uninstrumented complete: failures=$failures/10 ==="
           test "$failures" -eq 0
 
       - name: Preserve experiment logs
@@ -480,5 +513,5 @@ jobs:
             /tmp/staubli_ws/log
             /tmp/staubli_ws/k-only-pruning-*.log
             /tmp/staubli_ws/a-k-b-core-*.log
-            /tmp/staubli_ws/a-k-b-core-clean-*.log
+            /tmp/staubli_ws/a-psm-retained-k-b-core-clean-*.log
           if-no-files-found: ignore
