@@ -261,7 +261,7 @@ jobs:
           if source.count("planning_scene_monitor->stopPublishingScene();") != 0:
               raise SystemExit("Unexpected alternate PSM shutdown anchor.")
           # A=OFF: leave MoveItCpp, PlanningSceneMonitor, and main node owners unchanged.
-          # Targeted plugin-lifetime A/B: declare MoveGroupExe before the executor,
+          # K background: declare MoveGroupExe before the executor,
           # so reverse destruction destroys the executor WaitSet while capability
           # plugin instances and their plugin DSOs are still alive.
           declaration_order = """    rclcpp::executors::MultiThreadedExecutor executor;
@@ -310,7 +310,7 @@ jobs:
               raise SystemExit("Expected exactly one MoveGroupExe destructor; refusing to instrument.")
           source = source.replace(move_group_dtor, move_group_dtor_marked, 1)
           path.write_text(source)
-          print("Applied plugin-lifetime A/B and explicit MoveGroupExe capability/loader destructor markers.")
+          print("Retained K scope ordering and instrumented the stock MoveGroupExe capability/loader destructor.")
 
           # B=OFF: deliberately leave TrajectoryExecutionManager and plugin teardown untouched.
           if not (
@@ -491,4 +491,5 @@ jobs:
             /tmp/rclcpp_ws/log
             /tmp/moveit_ws/log
             /tmp/staubli_ws/log
+            /tmp/staubli_ws/k-only-pruning-*.log
           if-no-files-found: ignore
