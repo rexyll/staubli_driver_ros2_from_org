@@ -440,6 +440,148 @@ jobs:
           sequence_source_path.write_text(sequence_source)
           print("Applied isolated SequenceService callback-group treatment: reset service, then its dedicated group while plugin DSO is loaded.")
 
+          # Inject a deterministic, environment-gated same-pipeline concurrency probe.
+          pipeline_path = Path(
+              "/tmp/moveit_ws/src/moveit2/moveit_ros/planning/planning_pipeline/src/planning_pipeline.cpp"
+          )
+          pipeline_source = pipeline_path.read_text()
+          includes_anchor = "#include <fmt/format.h>\n"
+          if pipeline_source.count(includes_anchor) != 1:
+              raise SystemExit("Unexpected PlanningPipeline include structure; refusing to patch.")
+          if "STAUBLI_ACTIVE_PROBE" in pipeline_source:
+              raise SystemExit("PlanningPipeline active probe is already present; refusing duplicate patch.")
+          pipeline_source = pipeline_source.replace(
+              includes_anchor,
+              includes_anchor
+              + "#include <atomic>\n"
+              + "#include <chrono>\n"
+              + "#include <cmath>\n"
+              + "#include <condition_variable>\n"
+              + "#include <cstdio>\n"
+              + "#include <cstdlib>\n"
+              + "#include <mutex>\n",
+              1,
+          )
+          active_anchor = "  // Set planning pipeline active\n  active_ = true;"
+          if pipeline_source.count(active_anchor) != 1:
+              raise SystemExit("Expected one PlanningPipeline active=true anchor.")
+          probe_code = """  // CI-only deterministic probe. Disabled unless explicitly enabled by the test job.
+            const char* staubli_probe_env = std::getenv("STAUBLI_ACTIVE_PROBE");
+            const bool staubli_probe_enabled =
+                staubli_probe_env != nullptr && staubli_probe_env[0] == '1' && staubli_probe_env[1] == '\\0';
+            const bool staubli_probe_fast =
+                staubli_probe_enabled && std::fabs(req.allowed_planning_time - 7.731) < 1e-9;
+            const bool staubli_probe_slow =
+                staubli_probe_enabled && std::fabs(req.allowed_planning_time - 7.732) < 1e-9;
+
+            static std::mutex staubli_probe_mutex;
+            static std::condition_variable staubli_probe_cv;
+            static std::atomic<int> staubli_probe_inflight{0};
+            static bool staubli_probe_slow_entered = false;
+            static bool staubli_probe_fast_finished = false;
+
+            struct StaubliProbeFlightGuard
+            {
+              std::atomic<int>& inflight;
+              bool engaged{ false };
+              explicit StaubliProbeFlightGuard(std::atomic<int>& counter) : inflight(counter) {}
+              void enter()
+              {
+                inflight.fetch_add(1);
+                engaged = true;
+              }
+              void leave()
+              {
+                if (engaged)
+                {
+                  inflight.fetch_sub(1);
+                  engaged = false;
+                }
+              }
+              ~StaubliProbeFlightGuard()
+              {
+                leave();
+              }
+            };
+            StaubliProbeFlightGuard staubli_probe_guard(staubli_probe_inflight);
+
+            if (staubli_probe_fast || staubli_probe_slow)
+            {
+              staubli_probe_guard.enter();
+              std::unique_lock<std::mutex> probe_lock(staubli_probe_mutex);
+              if (staubli_probe_slow)
+              {
+                staubli_probe_slow_entered = true;
+                std::fprintf(stderr, "[STAUBLI_ACTIVE_PROBE] SLOW_ENTER pipeline=%p probe_inflight=%d\\n",
+                             static_cast<const void*>(this), staubli_probe_inflight.load());
+                std::fflush(stderr);
+                staubli_probe_cv.notify_all();
+                if (!staubli_probe_cv.wait_for(probe_lock, std::chrono::seconds(20),
+                                               []() { return staubli_probe_fast_finished; }))
+                {
+                  std::fprintf(stderr, "[STAUBLI_ACTIVE_PROBE] BARRIER_TIMEOUT role=slow pipeline=%p\\n",
+                               static_cast<const void*>(this));
+                  std::fflush(stderr);
+                  active_ = false;
+                  return false;
+                }
+                std::fprintf(stderr, "[STAUBLI_ACTIVE_PROBE] SLOW_RESUME pipeline=%p active=%d probe_inflight=%d\\n",
+                             static_cast<const void*>(this), active_.load() ? 1 : 0, staubli_probe_inflight.load());
+                std::fflush(stderr);
+              }
+              else
+              {
+                if (!staubli_probe_cv.wait_for(probe_lock, std::chrono::seconds(20),
+                                               []() { return staubli_probe_slow_entered; }))
+                {
+                  std::fprintf(stderr, "[STAUBLI_ACTIVE_PROBE] BARRIER_TIMEOUT role=fast pipeline=%p\\n",
+                               static_cast<const void*>(this));
+                  std::fflush(stderr);
+                  active_ = false;
+                  return false;
+                }
+                std::fprintf(stderr, "[STAUBLI_ACTIVE_PROBE] FAST_ENTER pipeline=%p probe_inflight=%d\\n",
+                             static_cast<const void*>(this), staubli_probe_inflight.load());
+                std::fprintf(stderr, "[STAUBLI_ACTIVE_PROBE] BARRIER_OPEN pipeline=%p probe_inflight=%d\\n",
+                             static_cast<const void*>(this), staubli_probe_inflight.load());
+                std::fflush(stderr);
+              }
+            }"""
+          pipeline_source = pipeline_source.replace(active_anchor, active_anchor + "\n" + probe_code, 1)
+          exit_anchor = """  // Set planning pipeline to inactive
+            active_ = false;
+            return static_cast<bool>(res);"""
+          if pipeline_source.count(exit_anchor) != 1:
+              raise SystemExit("Expected one normal PlanningPipeline inactive/return anchor.")
+          exit_probe = """  // Set planning pipeline to inactive
+            active_ = false;
+            if (staubli_probe_fast)
+            {
+              // Decrement before observing active_: the slow request remains inside generatePlan().
+              staubli_probe_guard.leave();
+              {
+                std::lock_guard<std::mutex> probe_lock(staubli_probe_mutex);
+                std::fprintf(stderr,
+                             "[STAUBLI_ACTIVE_PROBE] FAST_EXIT pipeline=%p active=%d probe_inflight=%d slow_inflight=%d\\n",
+                             static_cast<const void*>(this), active_.load() ? 1 : 0,
+                             staubli_probe_inflight.load(), staubli_probe_slow_entered ? 1 : 0);
+                std::fflush(stderr);
+                staubli_probe_fast_finished = true;
+              }
+              staubli_probe_cv.notify_all();
+            }
+            return static_cast<bool>(res);"""
+          pipeline_source = pipeline_source.replace(exit_anchor, exit_probe, 1)
+          pipeline_path.write_text(pipeline_source)
+          if not (
+              pipeline_source.count("STAUBLI_ACTIVE_PROBE") >= 8
+              and "staubli_probe_guard.leave();" in pipeline_source
+              and "staubli_probe_inflight.load()" in pipeline_source
+              and "std::chrono::seconds(20)" in pipeline_source
+          ):
+              raise SystemExit("PlanningPipeline active-probe final validation failed.")
+          print("Applied environment-gated, timeout-protected PlanningPipeline overlap probe to temporary MoveIt overlay.")
+
           if not (
               "[PSM-DTOR] BEGIN" in psm_source
               and "[PSM-DTOR] BODY-END" in psm_source
@@ -523,10 +665,110 @@ jobs:
           test_path = Path("/tmp/staubli_ws/src/staubli_driver_ros2/staubli_moveit_config/test/test_moveit_mock_planning.launch.py")
           source = test_path.read_text()
 
+          import_anchor = "from moveit_msgs.msg import Constraints, JointConstraint, MoveItErrorCodes"
+          if source.count(import_anchor) != 1:
+              raise SystemExit("Unexpected mock launch-test import structure.")
+          source = source.replace(
+              import_anchor,
+              "from moveit_msgs.msg import Constraints, JointConstraint, MotionSequenceItem, MoveItErrorCodes\n"
+              "from moveit_msgs.srv import GetMotionPlan, GetMotionSequence",
+              1,
+          )
+
           shutdown_anchor = "\n\n@launch_testing.post_shutdown_test()\n"
           method_name = "test_z_move_group_executes_joint_goal_on_mock_controller"
-          if source.count(shutdown_anchor) != 1 or method_name in source:
-              raise SystemExit("Unexpected launch-test structure; refusing to add execution coverage.")
+          concurrency_method_name = "test_y_same_ompl_pipeline_plan_and_sequence_overlap"
+          if (
+              source.count(shutdown_anchor) != 1
+              or method_name in source
+              or concurrency_method_name in source
+          ):
+              raise SystemExit("Unexpected launch-test structure; refusing duplicate test injection.")
+
+          concurrency_method = '''
+              def test_y_same_ompl_pipeline_plan_and_sequence_overlap(self):
+                  """Force PlanService and SequenceService to overlap inside one OMPL pipeline."""
+                  plan_client = self.node.create_client(GetMotionPlan, "/plan_kinematic_path")
+                  sequence_client = self.node.create_client(GetMotionSequence, "/plan_sequence_path")
+                  self.assertTrue(
+                      plan_client.wait_for_service(timeout_sec=120.0),
+                      "GetMotionPlan service did not become available",
+                  )
+                  self.assertTrue(
+                      sequence_client.wait_for_service(timeout_sec=120.0),
+                      "GetMotionSequence service did not become available",
+                  )
+
+                  def make_constraints():
+                      constraints = Constraints()
+                      target_positions = (0.11, 0.21, 0.31, 0.41, 0.51, 0.61)
+                      for index, position in enumerate(target_positions, start=1):
+                          joint = JointConstraint()
+                          joint.joint_name = f"joint_{index}"
+                          joint.position = position
+                          joint.tolerance_above = 0.05
+                          joint.tolerance_below = 0.05
+                          joint.weight = 1.0
+                          constraints.joint_constraints.append(joint)
+                      return constraints
+
+                  plan_request = GetMotionPlan.Request()
+                  plan_request.motion_plan_request.group_name = "arm"
+                  plan_request.motion_plan_request.pipeline_id = "ompl"
+                  plan_request.motion_plan_request.allowed_planning_time = 7.731
+                  plan_request.motion_plan_request.num_planning_attempts = 2
+                  plan_request.motion_plan_request.start_state.is_diff = True
+                  plan_request.motion_plan_request.goal_constraints.append(make_constraints())
+                  plan_request.motion_plan_request.max_velocity_scaling_factor = 0.5
+                  plan_request.motion_plan_request.max_acceleration_scaling_factor = 0.5
+
+                  sequence_request = GetMotionSequence.Request()
+                  sequence_item = MotionSequenceItem()
+                  sequence_item.req.group_name = "arm"
+                  sequence_item.req.pipeline_id = "ompl"
+                  sequence_item.req.allowed_planning_time = 7.732
+                  sequence_item.req.num_planning_attempts = 2
+                  sequence_item.req.start_state.is_diff = True
+                  sequence_item.req.goal_constraints.append(make_constraints())
+                  sequence_item.req.max_velocity_scaling_factor = 0.5
+                  sequence_item.req.max_acceleration_scaling_factor = 0.5
+                  sequence_item.blend_radius = 0.0
+                  sequence_request.request.items.append(sequence_item)
+
+                  # Both service requests are outstanding together. The server-side
+                  # generatePlan barrier decides their order deterministically.
+                  plan_future = plan_client.call_async(plan_request)
+                  sequence_future = sequence_client.call_async(sequence_request)
+                  rclpy.spin_until_future_complete(self.node, plan_future, timeout_sec=120.0)
+                  rclpy.spin_until_future_complete(self.node, sequence_future, timeout_sec=120.0)
+                  self.assertTrue(plan_future.done(), "PlanService concurrent request timed out")
+                  self.assertTrue(sequence_future.done(), "SequenceService concurrent request timed out")
+                  plan_response = plan_future.result()
+                  sequence_response = sequence_future.result()
+                  self.assertIsNotNone(plan_response)
+                  self.assertIsNotNone(sequence_response)
+                  self.assertEqual(
+                      plan_response.motion_plan_response.error_code.val,
+                      MoveItErrorCodes.SUCCESS,
+                  )
+                  self.assertTrue(
+                      plan_response.motion_plan_response.trajectory.joint_trajectory.points,
+                      "PlanService returned an empty trajectory",
+                  )
+                  self.assertEqual(
+                      sequence_response.response.error_code.val,
+                      MoveItErrorCodes.SUCCESS,
+                  )
+                  self.assertTrue(
+                      sequence_response.response.planned_trajectories,
+                      "SequenceService returned no planned trajectories",
+                  )
+                  self.assertTrue(
+                      sequence_response.response.planned_trajectories[0].joint_trajectory.points,
+                      "SequenceService returned an empty trajectory",
+                  )
+                  print("[STAUBLI_ACTIVE_PROBE_CLIENT] PASS plan=SUCCESS sequence=SUCCESS")
+          '''
 
           method = '''
               def test_z_move_group_executes_joint_goal_on_mock_controller(self):
@@ -582,11 +824,11 @@ jobs:
 
           source = source.replace(
               shutdown_anchor,
-              "\n\n" + method + shutdown_anchor,
+              "\n\n" + concurrency_method + "\n" + method + shutdown_anchor,
               1,
           )
           test_path.write_text(source)
-          print("Added isolated plan_only=False execution coverage after the original PR blob SHA check.")
+          print("Added deterministic same-pipeline PlanService/SequenceService overlap coverage plus mock execution coverage.")
           PY
           rosdep install --from-paths /tmp/staubli_ws/src --ignore-src --rosdistro jazzy -y
           cd /tmp/staubli_ws
@@ -601,6 +843,7 @@ jobs:
           source /tmp/moveit_ws/install/setup.bash
           source /tmp/staubli_ws/install/setup.bash
           unset LD_PRELOAD ASAN_OPTIONS
+          export STAUBLI_ACTIVE_PROBE=1
           # Capture DSO unload events, then inspect each CallbackGroup weak ServiceBase
           # control block at the reproducible pnode_ teardown SIGSEGV.
           # This is diagnostic-only; it does not change MoveIt/rclcpp/driver source.
@@ -829,6 +1072,7 @@ jobs:
             set -e
             set +e
             python3 - "$output_log" "$result_log" <<'PY'
+          import re
           from pathlib import Path
           import sys
 
@@ -869,6 +1113,9 @@ jobs:
           launch_tests = sum("Ran 1 test in" in line for line in lines)
           if launch_tests != 1:
               raise SystemExit(f"Expected one launch test execution, observed {launch_tests}")
+          concurrent_suites = sum("Ran 3 tests in" in line for line in lines)
+          if concurrent_suites != 1:
+              raise SystemExit(f"Expected the three-test pre-shutdown launch suite, observed {concurrent_suites}")
           # colcon test-result writes the aggregate summary to result_log, not output_log.
           passing_summaries = sum(
               "Summary: 7 tests, 0 errors, 0 failures, 0 skipped" in line
@@ -876,6 +1123,38 @@ jobs:
           )
           if passing_summaries != 1:
               raise SystemExit(f"Expected one clean 7-test summary, observed {passing_summaries}")
+          probe_names = ("SLOW_ENTER", "FAST_ENTER", "BARRIER_OPEN", "FAST_EXIT", "SLOW_RESUME")
+          probe_markers = {}
+          for name in probe_names:
+              found = [line for line in lines if f"[STAUBLI_ACTIVE_PROBE] {name} " in line]
+              if len(found) != 1:
+                  raise SystemExit(f"Expected exactly one active-probe {name} marker, observed {len(found)}")
+              probe_markers[name] = found[0]
+          pipeline_addresses = {
+              match.group(1) if (match := re.search(r"pipeline=(0x[0-9a-fA-F]+)", line)) else None
+              for line in probe_markers.values()
+          }
+          if len(pipeline_addresses) != 1 or None in pipeline_addresses:
+              raise SystemExit(f"Probe roles did not use one identical PlanningPipeline object: {pipeline_addresses}")
+          marker_order = ("SLOW_ENTER", "FAST_ENTER", "BARRIER_OPEN", "FAST_EXIT", "SLOW_RESUME")
+          marker_positions = [lines.index(probe_markers[name]) for name in marker_order]
+          if marker_positions != sorted(marker_positions):
+              raise SystemExit(f"Active-probe markers are out of order: {marker_positions}")
+          fast_exit = re.search(
+              r"FAST_EXIT pipeline=(0x[0-9a-fA-F]+) active=(\d+) probe_inflight=(\d+) slow_inflight=(\d+)",
+              probe_markers["FAST_EXIT"],
+          )
+          if not fast_exit or fast_exit.group(2) != "0" or fast_exit.group(3) != "1" or fast_exit.group(4) != "1":
+              raise SystemExit(f"Fast completion did not observe active=0 while one slow call remained: {probe_markers['FAST_EXIT']}")
+          slow_resume = re.search(
+              r"SLOW_RESUME pipeline=(0x[0-9a-fA-F]+) active=(\d+) probe_inflight=(\d+)",
+              probe_markers["SLOW_RESUME"],
+          )
+          if not slow_resume or slow_resume.group(2) != "0" or slow_resume.group(3) != "1":
+              raise SystemExit(f"Slow request did not resume with active=0/probe_inflight=1: {probe_markers['SLOW_RESUME']}")
+          client_pass = [line for line in lines if "[STAUBLI_ACTIVE_PROBE_CLIENT] PASS plan=SUCCESS sequence=SUCCESS" in line]
+          if len(client_pass) != 1:
+              raise SystemExit(f"Expected one successful concurrent service-client assertion, observed {len(client_pass)}")
           psm_retained = [
               line for line in lines
               if "[OWNER] PSM retained after MoveGroupExe/executor scope" in line
