@@ -414,8 +414,8 @@ jobs:
           sequence_source = sequence_source.replace(old_sequence_dtor, new_sequence_dtor, 1)
 
           old_sequence_create = """  sequence_service_ = context_->moveit_cpp_->getNode()->create_service<moveit_msgs::srv::GetMotionSequence>(
-      SEQUENCE_SERVICE_NAME,
-      [this](const moveit_msgs::srv::GetMotionSequence::Request::SharedPtr& req,
+                SEQUENCE_SERVICE_NAME,
+                [this](const moveit_msgs::srv::GetMotionSequence::Request::SharedPtr& req,
              const moveit_msgs::srv::GetMotionSequence::Response::SharedPtr& res) { return plan(req, res); });"""
           new_sequence_create = """  auto node = context_->moveit_cpp_->getNode();
           sequence_callback_group_ = node->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
