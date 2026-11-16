@@ -1117,12 +1117,14 @@ jobs:
           if concurrent_suites != 1:
               raise SystemExit(f"Expected the three-test pre-shutdown launch suite, observed {concurrent_suites}")
           # colcon test-result writes the aggregate summary to result_log, not output_log.
+          # The new same-pipeline unittest adds one xUnit test case to the
+          # existing seven-test package summary. Fail closed if the count drifts.
           passing_summaries = sum(
-              "Summary: 7 tests, 0 errors, 0 failures, 0 skipped" in line
+              "Summary: 8 tests, 0 errors, 0 failures, 0 skipped" in line
               for line in result_lines
           )
           if passing_summaries != 1:
-              raise SystemExit(f"Expected one clean 7-test summary, observed {passing_summaries}")
+              raise SystemExit(f"Expected one clean 8-test summary, observed {passing_summaries}")
           probe_names = ("SLOW_ENTER", "FAST_ENTER", "BARRIER_OPEN", "FAST_EXIT", "SLOW_RESUME")
           probe_markers = {}
           for name in probe_names:
