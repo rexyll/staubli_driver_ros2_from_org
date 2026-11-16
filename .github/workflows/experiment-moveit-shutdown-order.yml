@@ -362,6 +362,84 @@ jobs:
               raise SystemExit("Expected exactly one stock PlanningSceneMonitor destructor; refusing to patch.")
           psm_source = psm_source.replace(psm_dtor_old, psm_dtor_new, 1)
           psm_path.write_text(psm_source)
+          # Isolate SequenceService's ServiceBase weak entry in a capability-owned callback group.
+          sequence_header_path = Path(
+              "/tmp/moveit_ws/src/moveit2/moveit_planners/pilz_industrial_motion_planner/include/pilz_industrial_motion_planner/move_group_sequence_service.hpp"
+          )
+          sequence_header = sequence_header_path.read_text()
+          if sequence_header.count("#include <rclcpp/service.hpp>") != 1:
+              raise SystemExit("Unexpected SequenceService header include structure.")
+          if "rclcpp::CallbackGroup::SharedPtr sequence_callback_group_;" in sequence_header:
+              raise SystemExit("SequenceService callback-group treatment already present.")
+          sequence_header = sequence_header.replace(
+              "#include <rclcpp/service.hpp>",
+              "#include <rclcpp/callback_group.hpp>\n#include <rclcpp/service.hpp>",
+              1,
+          )
+          if sequence_header.count("  rclcpp::Service<moveit_msgs::srv::GetMotionSequence>::SharedPtr sequence_service_;") != 1:
+              raise SystemExit("Unexpected SequenceService member structure.")
+          sequence_header = sequence_header.replace(
+              "  rclcpp::Service<moveit_msgs::srv::GetMotionSequence>::SharedPtr sequence_service_;",
+              "  rclcpp::Service<moveit_msgs::srv::GetMotionSequence>::SharedPtr sequence_service_;\n"
+              "  rclcpp::CallbackGroup::SharedPtr sequence_callback_group_;",
+              1,
+          )
+          sequence_header_path.write_text(sequence_header)
+
+          sequence_source_path = Path(
+              "/tmp/moveit_ws/src/moveit2/moveit_planners/pilz_industrial_motion_planner/src/move_group_sequence_service.cpp"
+          )
+          sequence_source = sequence_source_path.read_text()
+          if "#include <cstdio>" in sequence_source:
+              raise SystemExit("Unexpected pre-existing SequenceService diagnostic include.")
+          sequence_source = sequence_source.replace(
+              "#include <pilz_industrial_motion_planner/move_group_sequence_service.hpp>",
+              "#include <cstdio>\n#include <pilz_industrial_motion_planner/move_group_sequence_service.hpp>",
+              1,
+          )
+
+          old_sequence_dtor = """MoveGroupSequenceService::~MoveGroupSequenceService()
+          {
+          }"""
+          new_sequence_dtor = """MoveGroupSequenceService::~MoveGroupSequenceService()
+          {
+            std::fprintf(stderr, "[SEQ-SERVICE] service reset BEGIN\\n");
+            sequence_service_.reset();
+            std::fprintf(stderr, "[SEQ-SERVICE] service reset END\\n");
+            sequence_callback_group_.reset();
+            std::fprintf(stderr, "[SEQ-SERVICE] callback group reset END\\n");
+          }"""
+          if sequence_source.count(old_sequence_dtor) != 1:
+              raise SystemExit("Expected exactly one empty MoveGroupSequenceService destructor.")
+          sequence_source = sequence_source.replace(old_sequence_dtor, new_sequence_dtor, 1)
+
+          old_sequence_create = """  sequence_service_ = context_->moveit_cpp_->getNode()->create_service<moveit_msgs::srv::GetMotionSequence>(
+      SEQUENCE_SERVICE_NAME,
+      [this](const moveit_msgs::srv::GetMotionSequence::Request::SharedPtr& req,
+             const moveit_msgs::srv::GetMotionSequence::Response::SharedPtr& res) { return plan(req, res); });"""
+          new_sequence_create = """  auto node = context_->moveit_cpp_->getNode();
+          sequence_callback_group_ = node->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+          sequence_service_ = node->create_service<moveit_msgs::srv::GetMotionSequence>(
+              SEQUENCE_SERVICE_NAME,
+              [this](const moveit_msgs::srv::GetMotionSequence::Request::SharedPtr& req,
+                     const moveit_msgs::srv::GetMotionSequence::Response::SharedPtr& res) {
+                return plan(req, res);
+              },
+              rclcpp::ServicesQoS(), sequence_callback_group_);"""
+          if sequence_source.count(old_sequence_create) != 1:
+              raise SystemExit("Expected exactly one stock SequenceService create_service call.")
+          sequence_source = sequence_source.replace(old_sequence_create, new_sequence_create, 1)
+
+          if not (
+              "sequence_callback_group_ = node->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);" in sequence_source
+              and "rclcpp::ServicesQoS(), sequence_callback_group_);" in sequence_source
+              and sequence_source.index("sequence_service_.reset();") < sequence_source.index("sequence_callback_group_.reset();")
+              and sequence_source.index("[SEQ-SERVICE] service reset END") < sequence_source.index("sequence_callback_group_.reset();")
+          ):
+              raise SystemExit("SequenceService callback-group ownership / teardown order validation failed.")
+          sequence_source_path.write_text(sequence_source)
+          print("Applied isolated SequenceService callback-group treatment: reset service, then its dedicated group while plugin DSO is loaded.")
+
           if not (
               "[PSM-DTOR] BEGIN" in psm_source
               and "[PSM-DTOR] BODY-END" in psm_source
@@ -395,6 +473,8 @@ jobs:
           git -C /tmp/moveit_ws/src/moveit2 diff -- moveit_ros/planning/planning_scene_monitor/src/planning_scene_monitor.cpp
           git -C /tmp/moveit_ws/src/moveit2 diff -- moveit_ros/planning/trajectory_execution_manager/src/trajectory_execution_manager.cpp
           git -C /tmp/moveit_ws/src/moveit2 diff -- moveit_ros/planning/trajectory_execution_manager/include/moveit/trajectory_execution_manager/trajectory_execution_manager.hpp
+          git -C /tmp/moveit_ws/src/moveit2 diff -- moveit_planners/pilz_industrial_motion_planner/include/pilz_industrial_motion_planner/move_group_sequence_service.hpp
+          git -C /tmp/moveit_ws/src/moveit2 diff -- moveit_planners/pilz_industrial_motion_planner/src/move_group_sequence_service.cpp
 
       - name: Install MoveIt source dependencies
         shell: bash
@@ -411,7 +491,7 @@ jobs:
           source /opt/ros/jazzy/setup.bash
           source /tmp/rclcpp_ws/install/setup.bash
           cd /tmp/moveit_ws
-          colcon build --packages-up-to moveit_ros_move_group --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_FLAGS='-O1 -g -fno-omit-frame-pointer' -DCMAKE_CXX_FLAGS='-O1 -g -fno-omit-frame-pointer' -DBUILD_TESTING=OFF
+          colcon build --packages-up-to pilz_industrial_motion_planner --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_FLAGS='-O1 -g -fno-omit-frame-pointer' -DCMAKE_CXX_FLAGS='-O1 -g -fno-omit-frame-pointer' -DBUILD_TESTING=OFF
 
       - name: Fetch and build Stäubli mock workspace against patched MoveIt
         shell: bash
@@ -545,11 +625,11 @@ jobs:
                   active_objfile = None
                   path_suffix = "libsequence_capability.so"
                   section_re = re.compile(
-                      r"\\s*0x([0-9a-fA-F]+)\\s*->\\s*0x([0-9a-fA-F]+)"
-                      r"\\s+at\\s+0x[0-9a-fA-F]+\\s*:\\s*(\\S+)\\s+(.*)"
+                      r"\s*0x([0-9a-fA-F]+)\s*->\s*0x([0-9a-fA-F]+)"
+                      r"\s+at\s+0x[0-9a-fA-F]+\s*:\s*(\S+)\s+(.*)"
                   )
                   for line in output.splitlines():
-                      obj_match = re.match(r"\\s*Object file:\\s*(.*)", line)
+                      obj_match = re.match(r"\s*Object file:\s*(.*)", line)
                       if obj_match:
                           active_objfile = obj_match.group(1).strip()
                           continue
@@ -562,37 +642,37 @@ jobs:
                               if start < end:
                                   sequence_capability_ranges.append((start, end, name))
                                   gdb.write(
-                                      "[GDB-DL-SECTION] section=%s start=0x%x end=0x%x\\n"
+                                      "[GDB-DL-SECTION] section=%s start=0x%x end=0x%x\n"
                                       % (name, start, end)
                                   )
                   if not sequence_capability_ranges:
-                      gdb.write("[GDB-DL-SECTION-ERROR] no sequence capability sections parsed\\n")
+                      gdb.write("[GDB-DL-SECTION-ERROR] no sequence capability sections parsed\n")
               except Exception as exc:
-                  gdb.write("[GDB-DL-SECTION-ERROR] %s\\n" % exc)
+                  gdb.write("[GDB-DL-SECTION-ERROR] %s\n" % exc)
 
           def _staubli_on_new_objfile(event):
               try:
                   obj = event.new_objfile
                   filename = obj.filename or ""
                   if filename.endswith("libsequence_capability.so"):
-                      gdb.write("[GDB-DL-OPEN] %s\\n" % filename)
+                      gdb.write("[GDB-DL-OPEN] %s\n" % filename)
                       _staubli_capture_sequence_sections()
               except Exception as exc:
-                  gdb.write("[GDB-DL-OPEN-ERROR] %s\\n" % exc)
+                  gdb.write("[GDB-DL-OPEN-ERROR] %s\n" % exc)
 
           def _staubli_on_free_objfile(event):
               try:
                   filename = event.objfile.filename or ""
                   if filename.endswith("libsequence_capability.so"):
-                      gdb.write("[GDB-DL-CLOSE] %s\\n" % filename)
+                      gdb.write("[GDB-DL-CLOSE] %s\n" % filename)
               except Exception as exc:
-                  gdb.write("[GDB-DL-CLOSE-ERROR] %s\\n" % exc)
+                  gdb.write("[GDB-DL-CLOSE-ERROR] %s\n" % exc)
 
           try:
               gdb.events.new_objfile.connect(_staubli_on_new_objfile)
               gdb.events.free_objfile.connect(_staubli_on_free_objfile)
           except Exception as exc:
-              gdb.write("[GDB-DL-HOOK-ERROR] %s\\n" % exc)
+              gdb.write("[GDB-DL-HOOK-ERROR] %s\n" % exc)
           end
 
           # Correlate service creation with its owning NodeBase and actual CallbackGroup.
@@ -713,6 +793,13 @@ jobs:
           GDB
           export STAUBLI_MOVE_GROUP_GDB_PREFIX='gdb --quiet --batch -x /tmp/staubli-move-group.gdb --args'
           cd /tmp/staubli_ws
+          pilz_prefix="$(ros2 pkg prefix pilz_industrial_motion_planner)"
+          case "$pilz_prefix" in
+            /tmp/moveit_ws/install/pilz_industrial_motion_planner) ;;
+            *) echo "Expected source-overlay Pilz package, got: $pilz_prefix"; exit 1 ;;
+          esac
+          test -f "$pilz_prefix/lib/libsequence_capability.so"
+          echo "Verified Sequence capability is loaded from source overlay: $pilz_prefix/lib/libsequence_capability.so"
           package_prefix="$(ros2 pkg prefix staubli_moveit_config)"
           test -d "$package_prefix"
           colcon list --base-paths src | awk '{print $1}' | grep -Fx "staubli_moveit_config"
