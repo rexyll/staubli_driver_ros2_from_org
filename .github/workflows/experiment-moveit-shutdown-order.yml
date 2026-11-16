@@ -96,7 +96,85 @@ jobs:
               raise SystemExit("Expected exactly one Executor destructor exit; refusing to instrument.")
           executor_source = executor_source.replace(executor_end, executor_end_marked, 1)
           executor_path.write_text(executor_source)
-          print("Applied CI-only Executor destructor entry/exit markers; upstream repository remains untouched.")
+
+          # Instrument each weak Waitable release in CallbackGroup's destructor.
+          callback_group_path = root / "callback_group.cpp"
+          callback_group_source = callback_group_path.read_text()
+          if "#include <cstdio>" not in callback_group_source:
+              callback_group_source = "#include <cstdio>\n" + callback_group_source
+          callback_group_old = (
+              "CallbackGroup::~CallbackGroup()\n"
+              "{\n"
+              "  trigger_notify_guard_condition();\n"
+              "}"
+          )
+          callback_group_new = (
+              "CallbackGroup::~CallbackGroup()\n"
+              "{\n"
+              "  std::fprintf(stderr, \"[LIFECYCLE] CallbackGroup dtor BEGIN this=%p waitables=%zu\\n\", "
+              "static_cast<void *>(this), waitable_ptrs_.size());\n"
+              "  std::fflush(stderr);\n"
+              "  trigger_notify_guard_condition();\n"
+              "  while (!waitable_ptrs_.empty()) {\n"
+              "    const std::size_t slot = waitable_ptrs_.size() - 1;\n"
+              "    auto & weak_waitable = waitable_ptrs_.back();\n"
+              "    std::fprintf(stderr, \"[LIFECYCLE] CallbackGroup weak Waitable release BEGIN slot=%zu expired=%d use_count=%ld\\n\", "
+              "slot, weak_waitable.expired() ? 1 : 0, weak_waitable.use_count());\n"
+              "    std::fflush(stderr);\n"
+              "    weak_waitable.reset();\n"
+              "    std::fprintf(stderr, \"[LIFECYCLE] CallbackGroup weak Waitable release END slot=%zu\\n\", slot);\n"
+              "    std::fflush(stderr);\n"
+              "    waitable_ptrs_.pop_back();\n"
+              "  }\n"
+              "  std::fprintf(stderr, \"[LIFECYCLE] CallbackGroup dtor weak Waitables CLEARED this=%p\\n\", "
+              "static_cast<void *>(this));\n"
+              "  std::fflush(stderr);\n"
+              "}"
+          )
+          if callback_group_source.count(callback_group_old) != 1:
+              raise SystemExit("Expected exactly one CallbackGroup destructor anchor; refusing to instrument.")
+          callback_group_source = callback_group_source.replace(callback_group_old, callback_group_new, 1)
+          callback_group_path.write_text(callback_group_source)
+
+          # NodeBase destructor body ends before its members (including the default group)
+          # are destroyed; these markers make that boundary explicit.
+          node_base_path = root / "node_interfaces" / "node_base.cpp"
+          node_base_source = node_base_path.read_text()
+          if "#include <cstdio>" not in node_base_source:
+              node_base_source = "#include <cstdio>\n" + node_base_source
+          node_base_old = (
+              "NodeBase::~NodeBase()\n"
+              "{\n"
+              "  // Finalize the interrupt guard condition after removing self from graph listener.\n"
+              "  {\n"
+              "    std::lock_guard<std::recursive_mutex> notify_condition_lock(notify_guard_condition_mutex_);\n"
+              "    notify_guard_condition_is_valid_ = false;\n"
+              "  }\n"
+              "}"
+          )
+          node_base_new = (
+              "NodeBase::~NodeBase()\n"
+              "{\n"
+              "  std::fprintf(stderr, \"[LIFECYCLE] NodeBase dtor BEGIN this=%p default_group=%p default_use_count=%ld weak_groups=%zu\\n\", "
+              "static_cast<void *>(this), static_cast<void *>(default_callback_group_.get()), "
+              "default_callback_group_.use_count(), callback_groups_.size());\n"
+              "  std::fflush(stderr);\n"
+              "  // Finalize the interrupt guard condition after removing self from graph listener.\n"
+              "  {\n"
+              "    std::lock_guard<std::recursive_mutex> notify_condition_lock(notify_guard_condition_mutex_);\n"
+              "    notify_guard_condition_is_valid_ = false;\n"
+              "  }\n"
+              "  std::fprintf(stderr, \"[LIFECYCLE] NodeBase dtor BODY END this=%p; members follow\\n\", "
+              "static_cast<void *>(this));\n"
+              "  std::fflush(stderr);\n"
+              "}"
+          )
+          if node_base_source.count(node_base_old) != 1:
+              raise SystemExit("Expected exactly one NodeBase destructor anchor; refusing to instrument.")
+          node_base_source = node_base_source.replace(node_base_old, node_base_new, 1)
+          node_base_path.write_text(node_base_source)
+
+          print("Applied CI-only Executor, CallbackGroup weak-Waitable, and NodeBase lifecycle markers; upstream repository remains untouched.")
           PY
           rosdep install --from-paths /tmp/rclcpp_ws/src/rclcpp/rclcpp --ignore-src --rosdistro jazzy -y
           cd /tmp/rclcpp_ws
@@ -136,13 +214,33 @@ jobs:
           source = source.replace(shutdown_anchor, insertion + shutdown_anchor, 1)
           if source.count("planning_scene_monitor->stopPublishingScene();") != 0:
               raise SystemExit("Unexpected alternate PSM shutdown anchor.")
-          # K-only control: retain stock main() local shared-owner lifetimes.
-          # Keep the common PSM publisher stop and MoveGroupExe/executor ordering
-          # changes below, while disabling A (the three explicit owner resets).
-          print("K-only baseline: no early reset of planning_scene_monitor, moveit_cpp, or nh.")
+          # A enabled: release main() owners after Context shutdown and before
+          # MoveGroupExe capability-loader destruction.
+          moveit_cpp_anchor = "  const auto moveit_cpp = std::make_shared<moveit_cpp::MoveItCpp>(nh, moveit_cpp_options);"
+          moveit_cpp_replacement = "  auto moveit_cpp = std::make_shared<moveit_cpp::MoveItCpp>(nh, moveit_cpp_options);"
+          psm_anchor = "  const auto planning_scene_monitor = moveit_cpp->getPlanningSceneMonitorNonConst();"
+          psm_replacement = "  auto planning_scene_monitor = moveit_cpp->getPlanningSceneMonitorNonConst();"
+          if source.count(moveit_cpp_anchor) != 1 or source.count(psm_anchor) != 1:
+              raise SystemExit("Expected unique main MoveItCpp/PSM owner declarations.")
+          source = source.replace(moveit_cpp_anchor, moveit_cpp_replacement, 1)
+          source = source.replace(psm_anchor, psm_replacement, 1)
+          shutdown_reset = """    rclcpp::shutdown();
+              planning_scene_monitor.reset();
+              moveit_cpp.reset();
+              nh.reset();"""
+          if source.count("    rclcpp::shutdown();") != 1:
+              raise SystemExit("Expected unique main Context shutdown anchor for owner reset.")
+          source = source.replace("    rclcpp::shutdown();", shutdown_reset, 1)
+          if not (
+              source.index("rclcpp::shutdown();")
+              < source.index("planning_scene_monitor.reset();")
+              < source.index("moveit_cpp.reset();")
+              < source.index("nh.reset();")
+          ):
+              raise SystemExit("Main node owner reset order validation failed.")
           if source.count("planning_scene_monitor->stopPublishingPlanningScene();") != 1:
               raise SystemExit("PSM publisher stop patch validation failed.")
-
+          print("A enabled: PSM -> MoveItCpp -> main Node owner resets after shutdown.")
           # Targeted plugin-lifetime A/B: declare MoveGroupExe before the executor,
           # so reverse destruction destroys the executor WaitSet while capability
           # plugin instances and their plugin DSOs are still alive.
@@ -194,7 +292,7 @@ jobs:
           path.write_text(source)
           print("Applied plugin-lifetime A/B and explicit MoveGroupExe capability/loader destructor markers.")
 
-          if False:  # Factorial A/B: main owner reset enabled; TEM explicit cleanup disabled
+          if True:  # A+B candidate: explicit TEM cleanup plus runtime lifetime markers
             tem_path = Path(
                 "/tmp/moveit_ws/src/moveit2/moveit_ros/planning/trajectory_execution_manager/src/"
                 "trajectory_execution_manager.cpp"
@@ -264,9 +362,13 @@ jobs:
                 "  controller_manager_.reset();\n"
                 "  RCLCPP_INFO(logger_, \"shutdown probe TEM before controller node reset: controller_context_valid=%d\", "
                 "(controller_mgr_node_ && controller_mgr_node_->get_node_base_interface()->get_context()->is_valid()));\n"
+                "  RCLCPP_INFO(logger_, \"shutdown probe TEM controller node use_count before reset=%ld\", controller_mgr_node_.use_count());\n"
                 "  controller_mgr_node_.reset();\n"
                 "  RCLCPP_INFO(logger_, \"shutdown probe TEM after controller node reset: main_context_valid=%d\", "
                 "node_->get_node_base_interface()->get_context()->is_valid());\n"
+                "  RCLCPP_INFO(logger_, \"shutdown probe TEM controller-manager loader reset BEGIN\");\n"
+                "  controller_manager_loader_.reset();\n"
+                "  RCLCPP_INFO(logger_, \"shutdown probe TEM controller-manager loader reset END\");\n"
                 "}\n"
             )
             tem_updated, tem_count = re.subn(tem_pattern, tem_replacement, tem_source, count=1)
@@ -284,6 +386,7 @@ jobs:
                 "private_executor_.reset();",
                 "controller_manager_.reset();",
                 "controller_mgr_node_.reset();",
+                "controller_manager_loader_.reset();",
             )
             if any(tem_source.count(token) != 1 for token in cleanup_tokens):
                 raise SystemExit("Internal controller-manager cleanup validation failed.")
@@ -296,11 +399,21 @@ jobs:
                 < tem_source.index("private_executor_.reset();")
                 < tem_source.index("controller_manager_.reset();")
                 < tem_source.index("controller_mgr_node_.reset();")
+                < tem_source.index("controller_manager_loader_.reset();")
             ):
                 raise SystemExit("Internal controller-manager teardown order validation failed.")
             tem_path.write_text(tem_source)
 
-          print("Applied TEM explicit cleanup together with main-node owner release and plugin-loader ordering changes.")
+          if not (
+              "planning_scene_monitor.reset();" in source
+              and "moveit_cpp.reset();" in source
+              and "nh.reset();" in source
+              and "controller_mgr_node_.reset();" in tem_source
+              and "controller_manager_loader_.reset();" in tem_source
+              and "planning_scene_monitor->stopPublishingPlanningScene();" in source
+          ):
+              raise SystemExit("A+B teardown patch final static validation failed.")
+          print("Applied A+B cleanup with controller-node-before-loader release and weak-Waitable markers.")
           print("Retained stock MoveIt Jazzy signal handling; no signal-wait patch was applied.")
           print("Validated unique include/init/executor/spin/main anchors and deferred context shutdown.")
           PY
