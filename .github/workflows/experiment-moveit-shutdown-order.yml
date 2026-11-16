@@ -183,9 +183,8 @@ jobs:
           if dynamic_storage_source.count("WaitSet WeakWaitableEntry dtor BEGIN") != 1:
               raise SystemExit("WaitSet weak-entry destructor marker validation failed.")
           dynamic_storage_path.write_text(dynamic_storage_source)
-          print("Added CI-only WaitSet weak-entry release markers; CallbackGroup::remove_waitable remains stock.")
           callback_group_path.write_text(callback_group_source)
-          print("Applied the sole functional counter-test: prune expired weak Waitables in remove_waitable().")
+          print("Added CI-only WaitSet weak-entry release markers; CallbackGroup::remove_waitable remains stock.")
 
           # NodeBase destructor body ends before its members (including the default group)
           # are destroyed; these markers make that boundary explicit.
