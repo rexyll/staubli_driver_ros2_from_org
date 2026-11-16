@@ -230,7 +230,7 @@ jobs:
           cd /tmp/rclcpp_ws
           colcon build --packages-select rclcpp --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_FLAGS='-O1 -g -fno-omit-frame-pointer' -DCMAKE_CXX_FLAGS='-O1 -g -fno-omit-frame-pointer' -DBUILD_TESTING=OFF
 
-      - name: Fetch MoveIt Jazzy source and apply K-only plus expired-entry pruning counter-test
+      - name: Fetch MoveIt Jazzy source and apply A+K+B-core cleanup probe
         shell: bash
         run: |
           set -eo pipefail
@@ -368,22 +368,22 @@ jobs:
               "    private_executor_->cancel();\n"
               "  if (private_executor_thread_.joinable())\n"
               "    private_executor_thread_.join();\n"
-              "  RCLCPP_INFO(logger_, \\"shutdown core-B: private executor reset BEGIN\\");\n"
+              "  RCLCPP_INFO(logger_, \"shutdown core-B: private executor reset BEGIN\");\n"
               "  if (private_executor_ && controller_mgr_node_) {\n"
               "    private_executor_->remove_node(controller_mgr_node_);\n"
-              "    RCLCPP_INFO(logger_, \\"shutdown core-B: private executor node removed\\");\n"
+              "    RCLCPP_INFO(logger_, \"shutdown core-B: private executor node removed\");\n"
               "  }\n"
               "  private_executor_.reset();\n"
-              "  RCLCPP_INFO(logger_, \\"shutdown core-B: private executor reset END\\");\n"
-              "  RCLCPP_INFO(logger_, \\"shutdown core-B: controller manager reset BEGIN\\");\n"
+              "  RCLCPP_INFO(logger_, \"shutdown core-B: private executor reset END\");\n"
+              "  RCLCPP_INFO(logger_, \"shutdown core-B: controller manager reset BEGIN\");\n"
               "  controller_manager_.reset();\n"
-              "  RCLCPP_INFO(logger_, \\"shutdown core-B: controller manager reset END\\");\n"
-              "  RCLCPP_INFO(logger_, \\"shutdown core-B: controller node reset BEGIN use_count=%ld\\", controller_mgr_node_.use_count());\n"
+              "  RCLCPP_INFO(logger_, \"shutdown core-B: controller manager reset END\");\n"
+              "  RCLCPP_INFO(logger_, \"shutdown core-B: controller node reset BEGIN use_count=%ld\", controller_mgr_node_.use_count());\n"
               "  controller_mgr_node_.reset();\n"
-              "  RCLCPP_INFO(logger_, \\"shutdown core-B: controller node reset END\\");\n"
-              "  RCLCPP_INFO(logger_, \\"shutdown core-B: controller-manager loader reset BEGIN\\");\n"
+              "  RCLCPP_INFO(logger_, \"shutdown core-B: controller node reset END\");\n"
+              "  RCLCPP_INFO(logger_, \"shutdown core-B: controller-manager loader reset BEGIN\");\n"
               "  controller_manager_loader_.reset();\n"
-              "  RCLCPP_INFO(logger_, \\"shutdown core-B: controller-manager loader reset END\\");\n"
+              "  RCLCPP_INFO(logger_, \"shutdown core-B: controller-manager loader reset END\");\n"
               "}\n"
           )
           tem_source, tem_count = re.subn(tem_pattern, tem_replacement, tem_source, count=1)
