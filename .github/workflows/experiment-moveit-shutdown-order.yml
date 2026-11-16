@@ -703,6 +703,17 @@ jobs:
           end
 
           run
+          # A clean inferior exit is a valid success path. Do not run post-mortem
+          # commands such as "bt full" after normal exit (there is no stack).
+          if !$_isvoid ($_exitcode)
+            printf "[GDB-INFERIOR-EXIT] code=%d\n", $_exitcode
+            if $_exitcode != 0
+              quit 1
+            end
+            quit 0
+          end
+          # SIGSEGV is configured as stop/print/nopass, so a crashing inferior
+          # remains stopped here and proceeds to the fault-frame diagnostics below.
           info program
           bt full
           info sharedlibrary
@@ -719,26 +730,6 @@ jobs:
           set $fault_vptr = *(void **)$fault_cb
           printf "[GDB-FAULT-CONTROL] control_block=%p vptr=%p\n", $fault_cb, $fault_vptr
           info symbol $fault_vptr
-          python
-          import gdb
-          fault_vptr = int(gdb.parse_and_eval("$fault_vptr"))
-          matches = [
-              (name, start, end)
-              for start, end, name in sequence_capability_ranges
-              if start <= fault_vptr < end
-          ]
-          if matches:
-              for name, start, end in matches:
-                  gdb.write(
-                      "[GDB-VPTR-DSO-MATCH] vptr=0x%x section=%s range=[0x%x,0x%x)\\n"
-                      % (fault_vptr, name, start, end)
-                  )
-          else:
-              gdb.write(
-                  "[GDB-VPTR-DSO-NO-MATCH] vptr=0x%x sequence_capability_sections=%d\\n"
-                  % (fault_vptr, len(sequence_capability_ranges))
-              )
-          end
           python
           import gdb
           fault_vptr = int(gdb.parse_and_eval("$fault_vptr"))
@@ -846,6 +837,9 @@ jobs:
           sigsegv = [line for line in lines if "received signal SIGSEGV" in line]
           if sigsegv:
               raise SystemExit(f"move_group received SIGSEGV under GDB: {sigsegv[0]}")
+          normal_exits = [line for line in lines if "[GDB-INFERIOR-EXIT] code=0" in line]
+          if len(normal_exits) != 1:
+              raise SystemExit(f"Expected exactly one clean GDB inferior exit marker, observed {len(normal_exits)}")
           markers = [
               "shutdown core-B: private executor reset BEGIN",
               "shutdown core-B: private executor node removed",
