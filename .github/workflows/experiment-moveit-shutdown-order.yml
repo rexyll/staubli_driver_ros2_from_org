@@ -86,11 +86,11 @@ jobs:
               "  auto moveit_cpp = std::make_shared<moveit_cpp::MoveItCpp>(nh, moveit_cpp_options);",
               1,
           )
-          # Keep the PSM alias const and retain its strong owner through the
-          # MoveGroupExe/executor block. This weak probe does not add an owner.
+          # Keep the PSM strongly owned through MoveGroupExe/executor destruction,
+          # then explicitly reset it after recording the weak-only use count.
           source = source.replace(
               psm_anchor,
-              psm_anchor + "\n  const auto planning_scene_monitor_lifetime = std::weak_ptr(planning_scene_monitor);",
+              "  auto planning_scene_monitor = moveit_cpp->getPlanningSceneMonitorNonConst();\n  const auto planning_scene_monitor_lifetime = std::weak_ptr(planning_scene_monitor);",
               1,
           )
           source = source.replace(
@@ -118,6 +118,11 @@ jobs:
               "  std::fprintf(stderr, \"[OWNER] PSM retained after MoveGroupExe/executor scope; use_count=%ld\\\\n\",\n"
               "    planning_scene_monitor_lifetime.use_count());\n"
               "  std::fflush(stderr);\n"
+              "  std::fprintf(stderr, \"[OWNER] PSM explicit reset BEGIN use_count=%ld\\n\", planning_scene_monitor.use_count());\n"
+              "  std::fflush(stderr);\n"
+              "  planning_scene_monitor.reset();\n"
+              "  std::fprintf(stderr, \"[OWNER] PSM explicit reset END\\n\");\n"
+              "  std::fflush(stderr);\n"
               "\n"
               "  return 0;"
           )
@@ -125,7 +130,7 @@ jobs:
               raise SystemExit("Expected exactly one post-MoveGroupExe scope anchor for PSM weak probe.")
           source = source.replace(after_scope_anchor, after_scope_probe, 1)
           if not (
-              "planning_scene_monitor.reset();" not in source
+              source.count("planning_scene_monitor.reset();") == 1
               and "moveit_cpp.reset();" in source
               and "nh.reset();" in source
               and "planning_scene_monitor_lifetime.expired()" in source
@@ -256,6 +261,104 @@ jobs:
               raise SystemExit("B-core slice unexpectedly resets event subscription/callback resources.")
           tem_path.write_text(tem_source)
 
+          # Instrument the temporary MoveIt overlay's PSM destructor only. Keep
+          # cleanup operations unchanged; markers distinguish destructor-body
+          # completion from implicit member/Node destruction after the body.
+          psm_path = Path(
+              "/tmp/moveit_ws/src/moveit2/moveit_ros/planning/planning_scene_monitor/src/planning_scene_monitor.cpp"
+          )
+          psm_source = psm_path.read_text()
+          if "#include <cstdio>" not in psm_source:
+              if psm_source.count("#include <memory>\n") != 1:
+                  raise SystemExit("Could not locate unique PSM include insertion anchor.")
+              psm_source = psm_source.replace("#include <memory>\n", "#include <cstdio>\n#include <memory>\n", 1)
+          psm_dtor_old = """PlanningSceneMonitor::~PlanningSceneMonitor()
+          {
+            if (scene_)
+            {
+              scene_->setCollisionObjectUpdateCallback(collision_detection::World::ObserverCallbackFn());
+              scene_->setAttachedBodyUpdateCallback(moveit::core::AttachedBodyCallback());
+            }
+            stopPublishingPlanningScene();
+            stopStateMonitor();
+            stopWorldGeometryMonitor();
+            stopSceneMonitor();
+
+            private_executor_->cancel();
+            if (private_executor_thread_.joinable())
+              private_executor_thread_.join();
+            private_executor_.reset();
+
+            current_state_monitor_.reset();
+            scene_const_.reset();
+            scene_.reset();
+            parent_scene_.reset();
+            robot_model_.reset();
+            rm_loader_.reset();
+          }"""
+          psm_dtor_new = """PlanningSceneMonitor::~PlanningSceneMonitor()
+          {
+            std::fprintf(stderr, "[PSM-DTOR] BEGIN node_use=%ld pnode_use=%ld\\n", node_.use_count(), pnode_.use_count());
+            std::fflush(stderr);
+            if (scene_)
+            {
+              scene_->setCollisionObjectUpdateCallback(collision_detection::World::ObserverCallbackFn());
+              scene_->setAttachedBodyUpdateCallback(moveit::core::AttachedBodyCallback());
+            }
+            stopPublishingPlanningScene();
+            std::fprintf(stderr, "[PSM-DTOR] after stopPublishingPlanningScene\\n");
+            std::fflush(stderr);
+            stopStateMonitor();
+            std::fprintf(stderr, "[PSM-DTOR] after stopStateMonitor\\n");
+            std::fflush(stderr);
+            stopWorldGeometryMonitor();
+            std::fprintf(stderr, "[PSM-DTOR] after stopWorldGeometryMonitor\\n");
+            std::fflush(stderr);
+            stopSceneMonitor();
+            std::fprintf(stderr, "[PSM-DTOR] after stopSceneMonitor\\n");
+            std::fflush(stderr);
+
+            private_executor_->cancel();
+            std::fprintf(stderr, "[PSM-DTOR] private executor canceled\\n");
+            std::fflush(stderr);
+            if (private_executor_thread_.joinable())
+              private_executor_thread_.join();
+            std::fprintf(stderr, "[PSM-DTOR] private executor thread joined\\n");
+            std::fflush(stderr);
+            private_executor_.reset();
+            std::fprintf(stderr, "[PSM-DTOR] private executor reset\\n");
+            std::fflush(stderr);
+
+            current_state_monitor_.reset();
+            std::fprintf(stderr, "[PSM-DTOR] current_state_monitor reset\\n");
+            std::fflush(stderr);
+            scene_const_.reset();
+            std::fprintf(stderr, "[PSM-DTOR] scene_const reset\\n");
+            std::fflush(stderr);
+            scene_.reset();
+            std::fprintf(stderr, "[PSM-DTOR] scene reset\\n");
+            std::fflush(stderr);
+            parent_scene_.reset();
+            std::fprintf(stderr, "[PSM-DTOR] parent_scene reset\\n");
+            std::fflush(stderr);
+            robot_model_.reset();
+            std::fprintf(stderr, "[PSM-DTOR] robot_model reset\\n");
+            std::fflush(stderr);
+            rm_loader_.reset();
+            std::fprintf(stderr, "[PSM-DTOR] BODY-END node_use=%ld pnode_use=%ld\\n", node_.use_count(), pnode_.use_count());
+            std::fflush(stderr);
+          }"""
+          if psm_source.count(psm_dtor_old) != 1:
+              raise SystemExit("Expected exactly one stock PlanningSceneMonitor destructor; refusing to patch.")
+          psm_source = psm_source.replace(psm_dtor_old, psm_dtor_new, 1)
+          psm_path.write_text(psm_source)
+          if not (
+              "[PSM-DTOR] BEGIN" in psm_source
+              and "[PSM-DTOR] BODY-END" in psm_source
+              and psm_source.count("PlanningSceneMonitor::~PlanningSceneMonitor()") == 1
+          ):
+              raise SystemExit("PSM destructor diagnostic patch validation failed.")
+
           # This run must use pristine rclcpp: reject the diagnostic-only marker
           # that was intentionally present in Run #130, and is forbidden here.
           dynamic_storage_path = Path(
@@ -266,7 +369,7 @@ jobs:
               raise SystemExit("Stock rclcpp unexpectedly contains CI lifecycle instrumentation.")
 
           if not (
-              "planning_scene_monitor.reset();" not in source
+              source.count("planning_scene_monitor.reset();") == 1
               and "moveit_cpp.reset();" in source
               and "nh.reset();" in source
               and "planning_scene_monitor_lifetime" in source
@@ -279,6 +382,7 @@ jobs:
           PY
           git -C /tmp/moveit_ws/src/moveit2 diff --check
           git -C /tmp/moveit_ws/src/moveit2 diff -- moveit_ros/move_group/src/move_group.cpp
+          git -C /tmp/moveit_ws/src/moveit2 diff -- moveit_ros/planning/planning_scene_monitor/src/planning_scene_monitor.cpp
           git -C /tmp/moveit_ws/src/moveit2 diff -- moveit_ros/planning/trajectory_execution_manager/src/trajectory_execution_manager.cpp
           git -C /tmp/moveit_ws/src/moveit2 diff -- moveit_ros/planning/trajectory_execution_manager/include/moveit/trajectory_execution_manager/trajectory_execution_manager.hpp
 
@@ -426,8 +530,9 @@ jobs:
             colcon test --packages-select staubli_moveit_config --event-handlers console_direct+ --return-code-on-test-failure 2>&1 | tee "$output_log"
             test_rc=$?
             set -e
+            result_log="${output_log}.result.log"
             set +e
-            colcon test-result --verbose 2>&1 | tee -a "$output_log"
+            colcon test-result --verbose 2>&1 | tee "$result_log"
             result_rc=$?
             set -e
             set +e
@@ -479,6 +584,16 @@ jobs:
               raise SystemExit(f"Expected exactly one PSM-retained weak-owner marker, observed {len(psm_retained)}")
           if not any("use_count=" in line for line in psm_retained):
               raise SystemExit("PSM-retained marker did not report weak_ptr use_count.")
+          psm_reset_begin = [line for line in lines if "[OWNER] PSM explicit reset BEGIN" in line]
+          psm_reset_end = [line for line in lines if "[OWNER] PSM explicit reset END" in line]
+          psm_dtor_begin = [line for line in lines if "[PSM-DTOR] BEGIN" in line]
+          psm_dtor_body_end = [line for line in lines if "[PSM-DTOR] BODY-END" in line]
+          if not (len(psm_reset_begin) == len(psm_reset_end) == len(psm_dtor_begin) == 1):
+              raise SystemExit(
+                  "Expected one explicit PSM reset BEGIN/END and one PSM destructor BEGIN marker."
+              )
+          if len(psm_dtor_body_end) > 1:
+              raise SystemExit("Observed duplicate PSM destructor BODY-END markers.")
 
           if any(
               "Segmentation fault" in line or "exit code -11" in line
@@ -518,4 +633,5 @@ jobs:
             /tmp/staubli_ws/k-only-pruning-*.log
             /tmp/staubli_ws/a-k-b-core-*.log
             /tmp/staubli_ws/a-psm-retained-k-b-core-clean-*.log
+            /tmp/staubli_ws/a-psm-retained-k-b-core-clean-*.result.log
           if-no-files-found: ignore
