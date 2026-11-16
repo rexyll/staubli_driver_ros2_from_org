@@ -96,6 +96,53 @@ jobs:
               "  auto moveit_cpp = std::make_shared<moveit_cpp::MoveItCpp>(nh, moveit_cpp_options);",
               1,
           )
+          if "#include <std_srvs/srv/trigger.hpp>" not in source:
+              if source.count("#include <memory>\n") != 1:
+                  raise SystemExit("Could not locate unique MoveGroup include insertion anchor.")
+              source = source.replace(
+                  "#include <memory>\n",
+                  "#include <cstdlib>\n#include <memory>\n#include <std_srvs/srv/trigger.hpp>\n",
+                  1,
+              )
+          terminate_service_anchor = "  auto moveit_cpp = std::make_shared<moveit_cpp::MoveItCpp>(nh, moveit_cpp_options);\n"
+          if source.count(terminate_service_anchor) != 1:
+              raise SystemExit("Expected unique MoveItCpp main() owner for terminate-probe service.")
+          terminate_service_patch = """  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr staubli_terminate_probe_service;
+          const char* staubli_terminate_probe_env = std::getenv("STAUBLI_TERMINATE_PROBE");
+          if (staubli_terminate_probe_env != nullptr && staubli_terminate_probe_env[0] == '1' &&
+              staubli_terminate_probe_env[1] == '\\0')
+          {
+            nh->declare_parameter<bool>("staubli_test_slow_held", false);
+            nh->declare_parameter<bool>("staubli_test_release_slow", false);
+            staubli_terminate_probe_service = nh->create_service<std_srvs::srv::Trigger>(
+                "/staubli_test_terminate_ompl",
+                [moveit_cpp, nh](const std_srvs::srv::Trigger::Request::SharedPtr& request,
+                                 const std_srvs::srv::Trigger::Response::SharedPtr& response) {
+                  (void)request;
+                  const auto& pipelines = moveit_cpp->getPlanningPipelines();
+                  const auto pipeline = pipelines.find("ompl");
+                  const bool active_before =
+                      pipeline != pipelines.end() && pipeline->second && pipeline->second->isActive();
+                  const bool wrapper_result = moveit_cpp->terminatePlanningPipeline("ompl");
+                  std::fprintf(stderr, "[STAUBLI_TERMINATE_PROBE] WRAPPER_RETURN active_before=%d result=%d\\n",
+                               active_before ? 1 : 0, wrapper_result ? 1 : 0);
+                  std::fflush(stderr);
+                  response->success = wrapper_result;
+                  response->message = "MoveItCpp terminatePlanningPipeline invoked";
+                  const auto release_result =
+                      nh->set_parameter(rclcpp::Parameter("staubli_test_release_slow", true));
+                  std::fprintf(stderr, "[STAUBLI_TERMINATE_PROBE] RELEASE slow=%d\\n",
+                               release_result.successful ? 1 : 0);
+                  std::fflush(stderr);
+                });
+          }
+          source = source.replace(
+              terminate_service_anchor,
+              terminate_service_anchor + terminate_service_patch,
+              1,
+          )
+          if not ("staubli_test_terminate_ompl" in source and "terminatePlanningPipeline" in source):
+              raise SystemExit("MoveItCpp terminate-probe service static validation failed.") 
           # Keep the PSM strongly owned through MoveGroupExe/executor destruction,
           # then explicitly reset it after recording the weak-only use count.
           source = source.replace(
@@ -106,6 +153,7 @@ jobs:
           source = source.replace(
               "    rclcpp::shutdown();",
               """    rclcpp::shutdown();
+                  staubli_terminate_probe_service.reset();
                   moveit_cpp.reset();
                   nh.reset();""",
               1,
@@ -459,7 +507,8 @@ jobs:
               + "#include <condition_variable>\n"
               + "#include <cstdio>\n"
               + "#include <cstdlib>\n"
-              + "#include <mutex>\n",
+              + "#include <mutex>\n"
+              + "#include <thread>\n",
               1,
           )
           active_anchor = "  // Set planning pipeline active\n  active_ = true;"
@@ -473,6 +522,10 @@ jobs:
                 staubli_probe_enabled && std::fabs(req.allowed_planning_time - 7.731) < 1e-9;
             const bool staubli_probe_slow =
                 staubli_probe_enabled && std::fabs(req.allowed_planning_time - 7.732) < 1e-9;
+            const char* staubli_terminate_probe_env = std::getenv("STAUBLI_TERMINATE_PROBE");
+            const bool staubli_terminate_probe_enabled =
+                staubli_terminate_probe_env != nullptr && staubli_terminate_probe_env[0] == '1' &&
+                staubli_terminate_probe_env[1] == '\\0';
 
             static std::mutex staubli_probe_mutex;
             static std::condition_variable staubli_probe_cv;
@@ -528,6 +581,31 @@ jobs:
                 std::fprintf(stderr, "[STAUBLI_ACTIVE_PROBE] SLOW_RESUME pipeline=%p active=%d probe_inflight=%d\\n",
                              static_cast<const void*>(this), active_.load() ? 1 : 0, staubli_probe_inflight.load());
                 std::fflush(stderr);
+                if (staubli_terminate_probe_enabled)
+                {
+                  node_->set_parameter(rclcpp::Parameter("staubli_test_slow_held", true));
+                  std::fprintf(stderr, "[STAUBLI_TERMINATE_PROBE] SLOW_HELD active=%d\\n",
+                               active_.load() ? 1 : 0);
+                  std::fflush(stderr);
+                  bool release_slow = false;
+                  const auto release_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+                  while (std::chrono::steady_clock::now() < release_deadline && !release_slow)
+                  {
+                    node_->get_parameter("staubli_test_release_slow", release_slow);
+                    if (!release_slow)
+                    {
+                      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    }
+                  }
+                  std::fprintf(stderr, "[STAUBLI_TERMINATE_PROBE] SLOW_RELEASED released=%d\\n",
+                               release_slow ? 1 : 0);
+                  std::fflush(stderr);
+                  if (!release_slow)
+                  {
+                    active_ = false;
+                    return false;
+                  }
+                }
               }
               else
               {
@@ -572,9 +650,25 @@ jobs:
             }
             return static_cast<bool>(res);"""
           pipeline_source = pipeline_source.replace(exit_anchor, exit_probe, 1)
+          terminate_anchor = "void PlanningPipeline::terminate() const\n{\n"
+          if pipeline_source.count(terminate_anchor) != 1:
+              raise SystemExit("Expected exactly one PlanningPipeline::terminate() entry.")
+          terminate_entry_probe = """void PlanningPipeline::terminate() const
+          {
+            const char* terminate_probe_env = std::getenv("STAUBLI_TERMINATE_PROBE");
+            if (terminate_probe_env != nullptr && terminate_probe_env[0] == '1' && terminate_probe_env[1] == '\\0')
+            {
+              std::fprintf(stderr, "[STAUBLI_TERMINATE_PROBE] PIPELINE_TERMINATE_ENTER this=%p\\n",
+                           static_cast<const void*>(this));
+              std::fflush(stderr);
+            }
+          """
+          pipeline_source = pipeline_source.replace(terminate_anchor, terminate_entry_probe, 1)
           pipeline_path.write_text(pipeline_source)
           if not (
               pipeline_source.count("STAUBLI_ACTIVE_PROBE") >= 8
+              and "STAUBLI_TERMINATE_PROBE" in pipeline_source
+              and "staubli_test_slow_held" in pipeline_source
               and "staubli_probe_guard.leave();" in pipeline_source
               and "staubli_probe_inflight.load()" in pipeline_source
               and "std::chrono::seconds(20)" in pipeline_source
