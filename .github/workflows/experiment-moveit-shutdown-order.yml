@@ -764,6 +764,9 @@ jobs:
               raise SystemExit("Unexpected mock launch-test import structure.")
           source = source.replace(
               import_anchor,
+              "import time\n"
+              "from rcl_interfaces.srv import GetParameters\n"
+              "from std_srvs.srv import Trigger\n"
               "from moveit_msgs.msg import Constraints, JointConstraint, MotionSequenceItem, MoveItErrorCodes\n"
               "from moveit_msgs.srv import GetMotionPlan, GetMotionSequence",
               1,
@@ -784,6 +787,16 @@ jobs:
                   """Force PlanService and SequenceService to overlap inside one OMPL pipeline."""
                   plan_client = self.node.create_client(GetMotionPlan, "/plan_kinematic_path")
                   sequence_client = self.node.create_client(GetMotionSequence, "/plan_sequence_path")
+                  parameter_client = self.node.create_client(GetParameters, "/move_group/get_parameters")
+                  terminate_client = self.node.create_client(Trigger, "/staubli_test_terminate_ompl")
+                  self.assertTrue(
+                      parameter_client.wait_for_service(timeout_sec=120.0),
+                      "MoveGroup get_parameters service did not become available",
+                  )
+                  self.assertTrue(
+                      terminate_client.wait_for_service(timeout_sec=120.0),
+                      "MoveItCpp terminate-wrapper test service did not become available",
+                  )
                   self.assertTrue(
                       plan_client.wait_for_service(timeout_sec=120.0),
                       "GetMotionPlan service did not become available",
@@ -834,9 +847,33 @@ jobs:
                   plan_future = plan_client.call_async(plan_request)
                   sequence_future = sequence_client.call_async(sequence_request)
                   rclpy.spin_until_future_complete(self.node, plan_future, timeout_sec=120.0)
-                  rclpy.spin_until_future_complete(self.node, sequence_future, timeout_sec=120.0)
                   self.assertTrue(plan_future.done(), "PlanService concurrent request timed out")
-                  self.assertTrue(sequence_future.done(), "SequenceService concurrent request timed out")
+
+                  # The server parks the slow request after the fast request has cleared active_.
+                  slow_held = False
+                  for _ in range(200):
+                      parameter_request = GetParameters.Request()
+                      parameter_request.names = ["staubli_test_slow_held"]
+                      parameter_future = parameter_client.call_async(parameter_request)
+                      rclpy.spin_until_future_complete(self.node, parameter_future, timeout_sec=1.0)
+                      self.assertTrue(parameter_future.done(), "MoveGroup get_parameters request timed out")
+                      parameter_response = parameter_future.result()
+                      self.assertEqual(len(parameter_response.values), 1)
+                      if parameter_response.values[0].bool_value:
+                          slow_held = True
+                          break
+                      time.sleep(0.05)
+                  self.assertTrue(slow_held, "Slow generatePlan request never entered terminate-test hold")
+
+                  terminate_future = terminate_client.call_async(Trigger.Request())
+                  rclpy.spin_until_future_complete(self.node, terminate_future, timeout_sec=30.0)
+                  self.assertTrue(terminate_future.done(), "MoveItCpp terminate wrapper service timed out")
+                  terminate_response = terminate_future.result()
+                  self.assertIsNotNone(terminate_response)
+                  self.assertTrue(terminate_response.success, "MoveItCpp terminatePlanningPipeline returned false")
+
+                  rclpy.spin_until_future_complete(self.node, sequence_future, timeout_sec=120.0)
+                  self.assertTrue(sequence_future.done(), "SequenceService request did not resume after terminate probe")
                   plan_response = plan_future.result()
                   sequence_response = sequence_future.result()
                   self.assertIsNotNone(plan_response)
@@ -861,7 +898,7 @@ jobs:
                       sequence_response.response.planned_trajectories[0].joint_trajectory.points,
                       "SequenceService returned an empty trajectory",
                   )
-                  print("[STAUBLI_ACTIVE_PROBE_CLIENT] PASS plan=SUCCESS sequence=SUCCESS")
+                  print("[STAUBLI_ACTIVE_PROBE_CLIENT] PASS plan=SUCCESS sequence=SUCCESS terminate=wrapper_called")
           '''
 
           method = '''
@@ -938,6 +975,7 @@ jobs:
           source /tmp/staubli_ws/install/setup.bash
           unset LD_PRELOAD ASAN_OPTIONS
           export STAUBLI_ACTIVE_PROBE=1
+          export STAUBLI_TERMINATE_PROBE=1
           # Capture DSO unload events, then inspect each CallbackGroup weak ServiceBase
           # control block at the reproducible pnode_ teardown SIGSEGV.
           # This is diagnostic-only; it does not change MoveIt/rclcpp/driver source.
@@ -1248,9 +1286,22 @@ jobs:
           )
           if not slow_resume or slow_resume.group(2) != "0" or slow_resume.group(3) != "1":
               raise SystemExit(f"Slow request did not resume with active=0/probe_inflight=1: {probe_markers['SLOW_RESUME']}")
-          client_pass = [line for line in lines if "[STAUBLI_ACTIVE_PROBE_CLIENT] PASS plan=SUCCESS sequence=SUCCESS" in line]
+          client_pass = [line for line in lines if "[STAUBLI_ACTIVE_PROBE_CLIENT] PASS plan=SUCCESS sequence=SUCCESS terminate=wrapper_called" in line]
           if len(client_pass) != 1:
-              raise SystemExit(f"Expected one successful concurrent service-client assertion, observed {len(client_pass)}")
+              raise SystemExit(f"Expected one successful concurrent service-client + terminate-wrapper assertion, observed {len(client_pass)}")
+          slow_held = [line for line in lines if "[STAUBLI_TERMINATE_PROBE] SLOW_HELD " in line]
+          if len(slow_held) != 1 or not re.search(r"active=0", slow_held[0]):
+              raise SystemExit(f"Slow call was not held in the active=false window: {slow_held}")
+          wrapper_calls = [line for line in lines if "[STAUBLI_TERMINATE_PROBE] WRAPPER_RETURN " in line]
+          if len(wrapper_calls) != 1 or not re.search(r"active_before=0 result=1", wrapper_calls[0]):
+              raise SystemExit(f"Expected MoveItCpp wrapper to return with active_before=0: {wrapper_calls}")
+          terminate_entries = [line for line in lines if "[STAUBLI_TERMINATE_PROBE] PIPELINE_TERMINATE_ENTER " in line]
+          if terminate_entries:
+              raise SystemExit(f"PlanningPipeline::terminate unexpectedly entered despite active_before=0: {terminate_entries}")
+          slow_releases = [line for line in lines if "[STAUBLI_TERMINATE_PROBE] SLOW_RELEASED released=1" in line]
+          service_releases = [line for line in lines if "[STAUBLI_TERMINATE_PROBE] RELEASE slow=1" in line]
+          if len(slow_releases) != 1 or len(service_releases) != 1:
+              raise SystemExit(f"Slow hold/release did not complete cleanly: slow={slow_releases}, service={service_releases}")
           psm_retained = [
               line for line in lines
               if "[OWNER] PSM retained after MoveGroupExe/executor scope" in line
