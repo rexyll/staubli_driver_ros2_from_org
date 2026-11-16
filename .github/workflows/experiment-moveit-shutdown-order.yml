@@ -229,6 +229,15 @@ jobs:
               raise SystemExit("B-core slice unexpectedly resets event subscription/callback resources.")
           tem_path.write_text(tem_source)
 
+          # This run must use pristine rclcpp: reject the diagnostic-only marker
+          # that was intentionally present in Run #130, and is forbidden here.
+          dynamic_storage_path = Path(
+              "/tmp/rclcpp_ws/src/rclcpp/rclcpp/include/rclcpp/wait_set_policies/dynamic_storage.hpp"
+          )
+          dynamic_storage_source = dynamic_storage_path.read_text()
+          if "WaitSet WeakWaitableEntry dtor BEGIN" in dynamic_storage_source:
+              raise SystemExit("Stock rclcpp unexpectedly contains CI lifecycle instrumentation.")
+
           if not (
               "planning_scene_monitor.reset();" in source
               and "moveit_cpp.reset();" in source
@@ -236,9 +245,6 @@ jobs:
               and "private_executor_.reset();" in tem_source
               and "controller_mgr_node_.reset();" in tem_source
               and "controller_manager_loader_.reset();" in tem_source
-              and "WaitSet WeakWaitableEntry dtor BEGIN" in Path(
-                  "/tmp/rclcpp_ws/src/rclcpp/rclcpp/include/rclcpp/wait_set_policies/dynamic_storage.hpp"
-              ).read_text()
           ):
               raise SystemExit("A+K+B-core final static validation failed.")
           print("Applied A=ON, fixed K background, and B core cleanup only; event cleanup remains unmodified.")
