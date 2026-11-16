@@ -57,6 +57,7 @@ jobs:
           set -eo pipefail
           mkdir -p /tmp/moveit_ws/src
           git clone --depth 1 --branch jazzy https://github.com/moveit/moveit2.git /tmp/moveit_ws/src/moveit2
+          echo "MoveIt Jazzy resolved source commit: $(git -C /tmp/moveit_ws/src/moveit2 rev-parse HEAD)"
           python3 - <<'PY'
           from pathlib import Path
           import re
@@ -535,15 +536,40 @@ jobs:
           # Record the exact DSO path before GDB removes its objfile on dlclose.
           python
           import gdb
+          sequence_capability_ranges = []
+
+          def _staubli_on_new_objfile(event):
+              try:
+                  obj = event.new_objfile
+                  filename = obj.filename or ""
+                  if filename.endswith("libsequence_capability.so"):
+                      gdb.write("[GDB-DL-OPEN] %s\\n" % filename)
+                      for section in obj.sections():
+                          start = int(section.start)
+                          end = int(section.end)
+                          name = section.name
+                          if start < end:
+                              sequence_capability_ranges.append((start, end, name))
+                          gdb.write(
+                              "[GDB-DL-SECTION] section=%s start=0x%x end=0x%x\\n"
+                              % (name, start, end)
+                          )
+              except Exception as exc:
+                  gdb.write("[GDB-DL-OPEN-ERROR] %s\\n" % exc)
+
           def _staubli_on_free_objfile(event):
               try:
-                  gdb.write("[GDB-DL-CLOSE] %s\n" % event.objfile.filename)
+                  filename = event.objfile.filename or ""
+                  if filename.endswith("libsequence_capability.so"):
+                      gdb.write("[GDB-DL-CLOSE] %s\\n" % filename)
               except Exception as exc:
-                  gdb.write("[GDB-DL-CLOSE-ERROR] %s\n" % exc)
+                  gdb.write("[GDB-DL-CLOSE-ERROR] %s\\n" % exc)
+
           try:
+              gdb.events.new_objfile.connect(_staubli_on_new_objfile)
               gdb.events.free_objfile.connect(_staubli_on_free_objfile)
           except Exception as exc:
-              gdb.write("[GDB-DL-CLOSE-HOOK-ERROR] %s\n" % exc)
+              gdb.write("[GDB-DL-HOOK-ERROR] %s\\n" % exc)
           end
 
           # Correlate service creation with its owning NodeBase and actual CallbackGroup.
@@ -577,6 +603,26 @@ jobs:
           set $fault_vptr = *(void **)$fault_cb
           printf "[GDB-FAULT-CONTROL] control_block=%p vptr=%p\n", $fault_cb, $fault_vptr
           info symbol $fault_vptr
+          python
+          import gdb
+          fault_vptr = int(gdb.parse_and_eval("$fault_vptr"))
+          matches = [
+              (name, start, end)
+              for start, end, name in sequence_capability_ranges
+              if start <= fault_vptr < end
+          ]
+          if matches:
+              for name, start, end in matches:
+                  gdb.write(
+                      "[GDB-VPTR-DSO-MATCH] vptr=0x%x section=%s range=[0x%x,0x%x)\\n"
+                      % (fault_vptr, name, start, end)
+                  )
+          else:
+              gdb.write(
+                  "[GDB-VPTR-DSO-NO-MATCH] vptr=0x%x sequence_capability_sections=%d\\n"
+                  % (fault_vptr, len(sequence_capability_ranges))
+              )
+          end
           x/4gx $fault_cb
 
           # Identify the exact CallbackGroup whose weak ServiceBase entry is dying.
