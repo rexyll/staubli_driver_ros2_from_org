@@ -697,6 +697,7 @@ jobs:
               and "moveit_cpp.reset();" in source
               and "nh.reset();" in source
               and "planning_scene_monitor_lifetime" in source
+              and "staubli_terminate_probe_service.reset();" in source
               and "private_executor_.reset();" in tem_source
               and "controller_mgr_node_.reset();" in tem_source
               and "controller_manager_loader_.reset();" in tem_source
@@ -1302,6 +1303,8 @@ jobs:
           service_releases = [line for line in lines if "[STAUBLI_TERMINATE_PROBE] RELEASE slow=1" in line]
           if len(slow_releases) != 1 or len(service_releases) != 1:
               raise SystemExit(f"Slow hold/release did not complete cleanly: slow={slow_releases}, service={service_releases}")
+          if not (lines.index(slow_held[0]) < lines.index(wrapper_calls[0]) < lines.index(service_releases[0]) < lines.index(slow_releases[0])):
+              raise SystemExit("Expected slow hold -> MoveItCpp wrapper -> release signal -> slow resume ordering.")
           psm_retained = [
               line for line in lines
               if "[OWNER] PSM retained after MoveGroupExe/executor scope" in line
@@ -1333,7 +1336,7 @@ jobs:
               raise SystemExit("Post-shutdown process-exit assertion failed.")
           print(
               "Uninstrumented A-PSM-retained / B-core order verified; one mock execution succeeded; "
-              "one launch test and all seven test assertions passed."
+              "one launch test and all eight package xUnit assertions passed."
           )
           PY
             order_rc=$?
