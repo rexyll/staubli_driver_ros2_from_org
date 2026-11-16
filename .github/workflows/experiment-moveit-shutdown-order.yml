@@ -27,7 +27,16 @@ jobs:
           apt-get update
           apt-get install -y git gdb python3-colcon-common-extensions python3-rosdep python3-vcstool
           source /opt/ros/jazzy/setup.bash
-          rosdep update --rosdistro jazzy
+          for attempt in 1 2 3 4 5; do
+            if rosdep update --rosdistro jazzy; then
+              echo "rosdep update succeeded on attempt ${attempt}"
+              exit 0
+            fi
+            echo "rosdep update attempt ${attempt}/5 failed; retrying"
+            if [ "${attempt}" -lt 5 ]; then sleep 8; fi
+          done
+          echo "rosdep update failed after five attempts."
+          exit 1
 
       - name: Fetch and build stock ROS 2 Jazzy rclcpp overlay (no ASan, no source instrumentation)
         shell: bash
