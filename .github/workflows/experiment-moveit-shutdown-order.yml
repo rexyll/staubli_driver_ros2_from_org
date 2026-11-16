@@ -320,8 +320,12 @@ jobs:
               and "nh.reset();" not in source
           ):
               raise SystemExit("K-only A/B-disabled static validation failed.")
-          if callback_group_source.count("[PRUNE] CallbackGroup::remove_waitable erased expired weak Waitable") != 1:
-              raise SystemExit("Expected exactly one expired-entry pruning treatment.")
+          overlay_callback_group_path = Path(
+              "/tmp/rclcpp_ws/src/rclcpp/rclcpp/src/rclcpp/callback_group.cpp"
+          )
+          overlay_callback_group_source = overlay_callback_group_path.read_text()
+          if overlay_callback_group_source.count("[PRUNE] CallbackGroup::remove_waitable erased expired weak Waitable") != 1:
+              raise SystemExit("Expected exactly one expired-entry pruning treatment in the persisted rclcpp overlay.")
           print("Applied K-only background (A=OFF, B=OFF) plus the sole rclcpp expired-entry pruning treatment.")
           print("Retained stock MoveIt Jazzy signal handling; no signal-wait patch was applied.")
           print("Validated unique include/init/executor/spin/main anchors and deferred context shutdown.")
