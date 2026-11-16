@@ -135,49 +135,55 @@ jobs:
               raise SystemExit("Expected exactly one CallbackGroup destructor anchor; refusing to instrument.")
           callback_group_source = callback_group_source.replace(callback_group_old, callback_group_new, 1)
 
-          # Single functional counter-test: remove expired Waitable weak entries during
-          # remove_waitable(), before attempting to match the still-live target.
-          remove_waitable_old = (
-              "void\n"
-              "CallbackGroup::remove_waitable(const rclcpp::Waitable::SharedPtr waitable_ptr) noexcept\n"
-              "{\n"
-              "  std::lock_guard<std::mutex> lock(mutex_);\n"
-              "  for (auto iter = waitable_ptrs_.begin(); iter != waitable_ptrs_.end(); ++iter) {\n"
-              "    const auto shared_ptr = iter->lock();\n"
-              "    if (shared_ptr.get() == waitable_ptr.get()) {\n"
-              "      waitable_ptrs_.erase(iter);\n"
-              "      break;\n"
-              "    }\n"
-              "  }\n"
-              "}\n"
+          # The prior counter-test showed that pruning CallbackGroup entries alone
+          # does not fix teardown. Keep stock remove_waitable() unchanged and trace
+          # the separate weak entries owned by Executor::WaitSet DynamicStorage.
+          callback_group_path.write_text(callback_group_source)
+
+          dynamic_storage_path = Path(
+              "/tmp/rclcpp_ws/src/rclcpp/rclcpp/include/rclcpp/wait_set_policies/dynamic_storage.hpp"
           )
-          remove_waitable_new = (
-              "void\n"
-              "CallbackGroup::remove_waitable(const rclcpp::Waitable::SharedPtr waitable_ptr) noexcept\n"
-              "{\n"
-              "  std::lock_guard<std::mutex> lock(mutex_);\n"
-              "  for (auto iter = waitable_ptrs_.begin(); iter != waitable_ptrs_.end();) {\n"
-              "    const auto shared_ptr = iter->lock();\n"
-              "    if (!shared_ptr) {\n"
-              "      iter = waitable_ptrs_.erase(iter);\n"
-              "      std::fprintf(stderr, \"[PRUNE] CallbackGroup::remove_waitable erased expired weak Waitable group=%p target=%p remaining=%zu\\n\", "
-              "        static_cast<void *>(this), static_cast<void *>(waitable_ptr.get()), waitable_ptrs_.size());\n"
+          dynamic_storage_source = dynamic_storage_path.read_text()
+          if "#include <cstdio>" not in dynamic_storage_source:
+              dynamic_storage_source = dynamic_storage_source.replace(
+                  "#include <algorithm>\n",
+                  "#include <algorithm>\n#include <cstdio>\n",
+                  1,
+              )
+
+          weak_entry_expired_anchor = (
+              "    bool\n"
+              "    expired() const noexcept\n"
+              "    {\n"
+              "      return waitable.expired();\n"
+              "    }\n"
+          )
+          weak_entry_instrumented = (
+              "    ~WeakWaitableEntry()\n"
+              "    {\n"
+              "      std::fprintf(stderr, \"[LIFECYCLE] WaitSet WeakWaitableEntry dtor BEGIN entry=%p waitable_expired=%d waitable_use_count=%ld associated_expired=%d associated_use_count=%ld\\n\", "
+              "        static_cast<void *>(this), waitable.expired() ? 1 : 0, waitable.use_count(), "
+              "        associated_entity.expired() ? 1 : 0, associated_entity.use_count());\n"
               "      std::fflush(stderr);\n"
-              "      continue;\n"
+              "      associated_entity.reset();\n"
+              "      std::fprintf(stderr, \"[LIFECYCLE] WaitSet WeakWaitableEntry associated reset END entry=%p\\n\", static_cast<void *>(this));\n"
+              "      std::fflush(stderr);\n"
+              "      waitable.reset();\n"
+              "      std::fprintf(stderr, \"[LIFECYCLE] WaitSet WeakWaitableEntry waitable reset END entry=%p\\n\", static_cast<void *>(this));\n"
+              "      std::fflush(stderr);\n"
               "    }\n"
-              "    if (shared_ptr.get() == waitable_ptr.get()) {\n"
-              "      waitable_ptrs_.erase(iter);\n"
-              "      break;\n"
-              "    }\n"
-              "    ++iter;\n"
-              "  }\n"
-              "}\n"
           )
-          if callback_group_source.count(remove_waitable_old) != 1:
-              raise SystemExit("Expected exactly one stock remove_waitable body; refusing to apply pruning.")
-          callback_group_source = callback_group_source.replace(remove_waitable_old, remove_waitable_new, 1)
-          if callback_group_source.count("[PRUNE] CallbackGroup::remove_waitable erased expired weak Waitable") != 1:
-              raise SystemExit("Expired Waitable pruning marker validation failed.")
+          if dynamic_storage_source.count(weak_entry_expired_anchor) != 1:
+              raise SystemExit("Expected exactly one DynamicStorage::WeakWaitableEntry expired() anchor.")
+          dynamic_storage_source = dynamic_storage_source.replace(
+              weak_entry_expired_anchor,
+              weak_entry_expired_anchor + weak_entry_instrumented,
+              1,
+          )
+          if dynamic_storage_source.count("WaitSet WeakWaitableEntry dtor BEGIN") != 1:
+              raise SystemExit("WaitSet weak-entry destructor marker validation failed.")
+          dynamic_storage_path.write_text(dynamic_storage_source)
+          print("Added CI-only WaitSet weak-entry release markers; CallbackGroup::remove_waitable remains stock.")
           callback_group_path.write_text(callback_group_source)
           print("Applied the sole functional counter-test: prune expired weak Waitables in remove_waitable().")
 
@@ -238,10 +244,7 @@ jobs:
           path = Path("/tmp/moveit_ws/src/moveit2/moveit_ros/move_group/src/move_group.cpp")
           source = path.read_text()
 
-          # Common K background: stop and join the PSM scene-publishing thread
-          # after executor.spin() returns, before Context shutdown and executor destruction.
-          # A=OFF: retain main() shared owners until normal scope exit. B=OFF: retain the
-          # stock TEM destructor. The rclcpp expired-entry pruning above is the sole treatment.
+          # Fixed K background: stop/join the PSM scene publisher before Context shutdown.
           if source.count("  rclcpp::init(argc, argv);") != 1:
               raise SystemExit("Expected exactly one upstream rclcpp::init anchor.")
           if source.count("    executor.spin();") != 1:
@@ -250,20 +253,50 @@ jobs:
               raise SystemExit("Expected exactly one upstream rclcpp::shutdown anchor.")
           if "sigwait(" in source or "SignalHandlerOptions::None" in source:
               raise SystemExit("Unexpected custom signal handling in upstream baseline.")
-          shutdown_anchor = "    rclcpp::shutdown();"
-          if source.count(shutdown_anchor) != 1:
-              raise SystemExit("Expected exactly one upstream rclcpp::shutdown call.")
-          insertion = """    RCLCPP_INFO(nh->get_logger(), "shutdown K: stopping PSM scene publisher before Context shutdown");
-              planning_scene_monitor->stopPublishingPlanningScene();
-              RCLCPP_INFO(nh->get_logger(), "shutdown K: PSM scene publisher stopped and joined");
-          """
-          source = source.replace(shutdown_anchor, insertion + shutdown_anchor, 1)
-          if source.count("planning_scene_monitor->stopPublishingScene();") != 0:
-              raise SystemExit("Unexpected alternate PSM shutdown anchor.")
-          # A=OFF: leave MoveItCpp, PlanningSceneMonitor, and main node owners unchanged.
-          # K background: declare MoveGroupExe before the executor,
-          # so reverse destruction destroys the executor WaitSet while capability
-          # plugin instances and their plugin DSOs are still alive.
+          source = source.replace(
+              "    rclcpp::shutdown();",
+              """    RCLCPP_INFO(nh->get_logger(), "shutdown K: stopping PSM scene publisher before Context shutdown");
+                  planning_scene_monitor->stopPublishingPlanningScene();
+                  RCLCPP_INFO(nh->get_logger(), "shutdown K: PSM scene publisher stopped and joined");
+                  rclcpp::shutdown();""",
+              1,
+          )
+          if source.count("planning_scene_monitor->stopPublishingPlanningScene();") != 1:
+              raise SystemExit("K PSM publisher stop patch validation failed.")
+
+          # A=ON: release main() PSM, MoveItCpp and node owners after Context shutdown.
+          moveit_cpp_anchor = "  const auto moveit_cpp = std::make_shared<moveit_cpp::MoveItCpp>(nh, moveit_cpp_options);"
+          psm_anchor = "  const auto planning_scene_monitor = moveit_cpp->getPlanningSceneMonitorNonConst();"
+          if source.count(moveit_cpp_anchor) != 1 or source.count(psm_anchor) != 1:
+              raise SystemExit("Expected unique main() MoveItCpp/PSM owner declarations.")
+          source = source.replace(
+              moveit_cpp_anchor,
+              "  auto moveit_cpp = std::make_shared<moveit_cpp::MoveItCpp>(nh, moveit_cpp_options);",
+              1,
+          )
+          source = source.replace(
+              psm_anchor,
+              "  auto planning_scene_monitor = moveit_cpp->getPlanningSceneMonitorNonConst();",
+              1,
+          )
+          source = source.replace(
+              "    rclcpp::shutdown();",
+              """    rclcpp::shutdown();
+                  planning_scene_monitor.reset();
+                  moveit_cpp.reset();
+                  nh.reset();""",
+              1,
+          )
+          if not (
+              source.index("rclcpp::shutdown();")
+              < source.index("planning_scene_monitor.reset();")
+              < source.index("moveit_cpp.reset();")
+              < source.index("nh.reset();")
+          ):
+              raise SystemExit("A main() owner reset order validation failed.")
+
+          # Keep K executor/capability scope order: executor WaitSet is destroyed
+          # before MoveGroupExe capability plugins and their loader.
           declaration_order = """    rclcpp::executors::MultiThreadedExecutor executor;
 
               move_group::MoveGroupExe mge(moveit_cpp, default_planning_pipeline, debug);"""
@@ -271,12 +304,13 @@ jobs:
 
               rclcpp::executors::MultiThreadedExecutor executor;"""
           if source.count(declaration_order) != 1:
-              raise SystemExit("Expected exactly one executor/MoveGroupExe declaration pair; refusing to reorder.")
+              raise SystemExit("Expected exactly one MoveGroupExe/executor declaration pair.")
           source = source.replace(declaration_order, reordered_declarations, 1)
           if not source.index("move_group::MoveGroupExe mge") < source.index(
               "rclcpp::executors::MultiThreadedExecutor executor"
           ):
-              raise SystemExit("MoveGroupExe must be declared before executor for reverse destruction order.")
+              raise SystemExit("K MoveGroupExe/executor scope order validation failed.")
+
           if "#include <cstdio>" not in source:
               source = source.replace("#include <memory>\n", "#include <cstdio>\n#include <memory>\n", 1)
           move_group_dtor = (
@@ -291,9 +325,7 @@ jobs:
               "  ~MoveGroupExe()\n"
               "  {\n"
               "    std::fprintf(stderr, \"[LIFECYCLE] MoveGroupExe dtor BEGIN; capabilities=%zu loader=%d\\n\", "
-              "capabilities_.size(), capability_plugin_loader_ ? 1 : 0);\n"
-              "    std::fflush(stderr);\n"
-              "    std::fprintf(stderr, \"[LIFECYCLE] MoveGroupExe before capabilities_.clear\\n\");\n"
+              "      capabilities_.size(), capability_plugin_loader_ ? 1 : 0);\n"
               "    std::fflush(stderr);\n"
               "    capabilities_.clear();\n"
               "    std::fprintf(stderr, \"[LIFECYCLE] MoveGroupExe after capabilities_.clear\\n\");\n"
@@ -307,28 +339,98 @@ jobs:
               "  }"
           )
           if source.count(move_group_dtor) != 1:
-              raise SystemExit("Expected exactly one MoveGroupExe destructor; refusing to instrument.")
+              raise SystemExit("Expected exactly one MoveGroupExe destructor anchor.")
           source = source.replace(move_group_dtor, move_group_dtor_marked, 1)
           path.write_text(source)
-          print("Retained K scope ordering and instrumented the stock MoveGroupExe capability/loader destructor.")
 
-          # B=OFF: deliberately leave TrajectoryExecutionManager and plugin teardown untouched.
-          if not (
-              "planning_scene_monitor->stopPublishingPlanningScene();" in source
-              and "planning_scene_monitor.reset();" not in source
-              and "moveit_cpp.reset();" not in source
-              and "nh.reset();" not in source
-          ):
-              raise SystemExit("K-only A/B-disabled static validation failed.")
-          overlay_callback_group_path = Path(
-              "/tmp/rclcpp_ws/src/rclcpp/rclcpp/src/rclcpp/callback_group.cpp"
+          # B-core=ON: after stop/cancel/join, release private Executor/WaitSet,
+          # controller-manager instance, controller node and loader in this order.
+          # Event subscription, parameter callback and event callback group are
+          # intentionally NOT reset here; they remain a separate next slice.
+          tem_path = Path(
+              "/tmp/moveit_ws/src/moveit2/moveit_ros/planning/trajectory_execution_manager/src/trajectory_execution_manager.cpp"
           )
-          overlay_callback_group_source = overlay_callback_group_path.read_text()
-          if overlay_callback_group_source.count("[PRUNE] CallbackGroup::remove_waitable erased expired weak Waitable") != 1:
-              raise SystemExit("Expected exactly one expired-entry pruning treatment in the persisted rclcpp overlay.")
-          print("Applied K-only background (A=OFF, B=OFF) plus the sole rclcpp expired-entry pruning treatment.")
-          print("Retained stock MoveIt Jazzy signal handling; no signal-wait patch was applied.")
-          print("Validated unique include/init/executor/spin/main anchors and deferred context shutdown.")
+          tem_source = tem_path.read_text()
+          tem_pattern = (
+              r"TrajectoryExecutionManager::~TrajectoryExecutionManager\(\)\n"
+              r"\{\n"
+              r"  stopExecution\(true\);\n"
+              r"  if \(private_executor_\)\n"
+              r"    private_executor_->cancel\(\);\n"
+              r"  if \(private_executor_thread_\.joinable\(\)\)\n"
+              r"    private_executor_thread_\.join\(\);\n"
+              r"\}\n"
+          )
+          tem_replacement = (
+              "TrajectoryExecutionManager::~TrajectoryExecutionManager()\n"
+              "{\n"
+              "  stopExecution(true);\n"
+              "  if (private_executor_)\n"
+              "    private_executor_->cancel();\n"
+              "  if (private_executor_thread_.joinable())\n"
+              "    private_executor_thread_.join();\n"
+              "  RCLCPP_INFO(logger_, \\"shutdown core-B: private executor reset BEGIN\\");\n"
+              "  if (private_executor_ && controller_mgr_node_) {\n"
+              "    private_executor_->remove_node(controller_mgr_node_);\n"
+              "    RCLCPP_INFO(logger_, \\"shutdown core-B: private executor node removed\\");\n"
+              "  }\n"
+              "  private_executor_.reset();\n"
+              "  RCLCPP_INFO(logger_, \\"shutdown core-B: private executor reset END\\");\n"
+              "  RCLCPP_INFO(logger_, \\"shutdown core-B: controller manager reset BEGIN\\");\n"
+              "  controller_manager_.reset();\n"
+              "  RCLCPP_INFO(logger_, \\"shutdown core-B: controller manager reset END\\");\n"
+              "  RCLCPP_INFO(logger_, \\"shutdown core-B: controller node reset BEGIN use_count=%ld\\", controller_mgr_node_.use_count());\n"
+              "  controller_mgr_node_.reset();\n"
+              "  RCLCPP_INFO(logger_, \\"shutdown core-B: controller node reset END\\");\n"
+              "  RCLCPP_INFO(logger_, \\"shutdown core-B: controller-manager loader reset BEGIN\\");\n"
+              "  controller_manager_loader_.reset();\n"
+              "  RCLCPP_INFO(logger_, \\"shutdown core-B: controller-manager loader reset END\\");\n"
+              "}\n"
+          )
+          tem_source, tem_count = re.subn(tem_pattern, tem_replacement, tem_source, count=1)
+          if tem_count != 1:
+              raise SystemExit(
+                  f"Expected exactly one stock TEM destructor, found {tem_count}; refusing to patch."
+              )
+          required_core_tokens = (
+              "private_executor_->remove_node(controller_mgr_node_);",
+              "private_executor_.reset();",
+              "controller_manager_.reset();",
+              "controller_mgr_node_.reset();",
+              "controller_manager_loader_.reset();",
+          )
+          if any(tem_source.count(token) != 1 for token in required_core_tokens):
+              raise SystemExit("B-core teardown tokens must each occur exactly once.")
+          ordered_core_tokens = (
+              "private_executor_thread_.join();",
+              "private_executor_.reset();",
+              "controller_manager_.reset();",
+              "controller_mgr_node_.reset();",
+              "controller_manager_loader_.reset();",
+          )
+          if not all(tem_source.index(a) < tem_source.index(b) for a, b in zip(ordered_core_tokens, ordered_core_tokens[1:])):
+              raise SystemExit("B-core private-executor/manager/node/loader order invalid.")
+          if any(token in tem_source for token in (
+              "event_topic_subscriber_.reset();",
+              "callback_handler_.reset();",
+              "event_callback_group_.reset();",
+          )):
+              raise SystemExit("B-core slice unexpectedly resets event subscription/callback resources.")
+          tem_path.write_text(tem_source)
+
+          if not (
+              "planning_scene_monitor.reset();" in source
+              and "moveit_cpp.reset();" in source
+              and "nh.reset();" in source
+              and "private_executor_.reset();" in tem_source
+              and "controller_mgr_node_.reset();" in tem_source
+              and "controller_manager_loader_.reset();" in tem_source
+              and "WaitSet WeakWaitableEntry dtor BEGIN" in Path(
+                  "/tmp/rclcpp_ws/src/rclcpp/rclcpp/include/rclcpp/wait_set_policies/dynamic_storage.hpp"
+              ).read_text()
+          ):
+              raise SystemExit("A+K+B-core final static validation failed.")
+          print("Applied A=ON, fixed K background, and B core cleanup only; event cleanup remains unmodified.")
           PY
           git -C /tmp/moveit_ws/src/moveit2 diff --check
           git -C /tmp/moveit_ws/src/moveit2 diff -- moveit_ros/move_group/src/move_group.cpp
@@ -451,7 +553,7 @@ jobs:
           cd /tmp/staubli_ws
           colcon build --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_FLAGS='-O1 -g -fno-omit-frame-pointer' -DCMAKE_CXX_FLAGS='-O1 -g -fno-omit-frame-pointer' -DBUILD_TESTING=ON
 
-      - name: Run K-only mock execution, teardown and pruning-evidence regression
+      - name: Run A+K mock execution and B-core WaitSet teardown regression
         shell: bash
         run: |
           set -eo pipefail
@@ -462,34 +564,88 @@ jobs:
           unset LD_PRELOAD ASAN_OPTIONS
           cd /tmp/staubli_ws
           package_prefix="$(ros2 pkg prefix staubli_moveit_config)"
-          test -d "${package_prefix}"
+          test -d "$package_prefix"
           colcon list --base-paths src | awk '{print $1}' | grep -Fx "staubli_moveit_config"
-          echo "Test workspace preflight passed: package=staubli_moveit_config prefix=${package_prefix} workspace=/tmp/staubli_ws"
-          echo "Running K-only mock plan-and-execute with A/B disabled and rclcpp expired-weak-entry pruning as the sole functional treatment."
+          echo "Test workspace preflight passed: package=staubli_moveit_config prefix=$package_prefix workspace=/tmp/staubli_ws"
+          echo "Running A+K with B core cleanup only; CallbackGroup pruning and event-callback cleanup are disabled."
           failures=0
-          total_prunes=0
           for iteration in 1 2 3 4 5; do
-            echo "=== K-only + expired-entry pruning repetition ${iteration}/5 ==="
-            output_log="/tmp/staubli_ws/k-only-pruning-${iteration}.log"
+            echo "=== A+K+B-core repetition $iteration/5 ==="
+            output_log="/tmp/staubli_ws/a-k-b-core-$iteration.log"
             set +e
-            colcon test --packages-select staubli_moveit_config --event-handlers console_direct+ --return-code-on-test-failure 2>&1 | tee "${output_log}"
-            test_rc=${PIPESTATUS[0]}
+            colcon test --packages-select staubli_moveit_config --event-handlers console_direct+ --return-code-on-test-failure 2>&1 | tee "$output_log"
+            test_rc=$?
             set -e
             set +e
-            colcon test-result --verbose 2>&1 | tee -a "${output_log}"
-            result_rc=${PIPESTATUS[0]}
+            colcon test-result --verbose 2>&1 | tee -a "$output_log"
+            result_rc=$?
             set -e
-            prune_count="$(grep -cF '[PRUNE] CallbackGroup::remove_waitable erased expired weak Waitable' "${output_log}" || true)"
-            total_prunes=$((total_prunes + prune_count))
-            echo "=== Repetition ${iteration}/5 exit summary: colcon_test=${test_rc}, test_result=${result_rc}, expired_entries_pruned=${prune_count} ==="
-            if [ "${test_rc}" -ne 0 ] || [ "${result_rc}" -ne 0 ] || [ "${prune_count}" -eq 0 ]; then
+            set +e
+            python3 - "$output_log" <<'PY' 
+          from pathlib import Path
+          import sys
+
+          lines = Path(sys.argv[1]).read_text(errors="replace").splitlines()
+          markers = [
+              "shutdown core-B: private executor reset BEGIN",
+              "shutdown core-B: private executor reset END",
+              "shutdown core-B: controller manager reset BEGIN",
+              "shutdown core-B: controller manager reset END",
+              "shutdown core-B: controller node reset BEGIN",
+              "shutdown core-B: controller node reset END",
+              "shutdown core-B: controller-manager loader reset BEGIN",
+              "shutdown core-B: controller-manager loader reset END",
+          ]
+          positions = []
+          for marker in markers:
+              found = next((i for i, line in enumerate(lines) if marker in line), None)
+              if found is None:
+                  raise SystemExit(f"Missing lifecycle marker: {marker}")
+              positions.append(found)
+          if positions != sorted(positions):
+              raise SystemExit(f"B-core teardown markers out of order: {positions}")
+
+          private_executor_begin, private_executor_end = positions[0], positions[1]
+          weak_begin = [
+              i for i, line in enumerate(lines)
+              if "[LIFECYCLE] WaitSet WeakWaitableEntry dtor BEGIN" in line
+          ]
+          if not any(private_executor_begin < i < private_executor_end for i in weak_begin):
+              raise SystemExit("No WaitSet WeakWaitableEntry destruction occurred inside private_executor_.reset().")
+
+          action_successes = sum(
+              "Completed trajectory execution with status SUCCEEDED" in line
+              for line in lines
+          )
+          if action_successes < 1:
+              raise SystemExit("No successful mock plan-and-execute result was observed.")
+          if not any("Ran 1 test in" in line for line in lines):
+              raise SystemExit("The post-shutdown launch test did not execute.")
+          waitable_release_count = sum(
+              "[LIFECYCLE] WaitSet WeakWaitableEntry waitable reset END" in line
+              for line in lines
+          )
+          associated_release_count = sum(
+              "[LIFECYCLE] WaitSet WeakWaitableEntry associated reset END" in line
+              for line in lines
+          )
+          print(
+              f"B-core lifecycle order verified; waitable_release_markers={waitable_release_count}; "
+              f"associated_release_markers={associated_release_count}; mock_execution_successes={action_successes}"
+          )
+          PY
+            order_rc=$?
+            set -e
+            waitable_release_count="$(grep -cF '[LIFECYCLE] WaitSet WeakWaitableEntry waitable reset END' "$output_log" || true)"
+            associated_release_count="$(grep -cF '[LIFECYCLE] WaitSet WeakWaitableEntry associated reset END' "$output_log" || true)"
+            echo "=== Repetition $iteration/5 exit summary: colcon_test=$test_rc, test_result=$result_rc, lifecycle_order=$order_rc, waitable_release_markers=$waitable_release_count, associated_release_markers=$associated_release_count ==="
+            if [ "$test_rc" -ne 0 ] || [ "$result_rc" -ne 0 ] || [ "$order_rc" -ne 0 ] || [ "$waitable_release_count" -eq 0 ]; then
               failures=$((failures + 1))
-              echo "Repetition ${iteration}/5 failed or did not exercise pruning; continuing to collect remaining repetitions."
+              echo "Repetition $iteration/5 failed lifecycle ordering, execution, test, or teardown acceptance."
             fi
           done
-          echo "=== K-only + expired-entry pruning complete: failures=${failures}/5, total_expired_entries_pruned=${total_prunes} ==="
-          test "${total_prunes}" -gt 0
-          test "${failures}" -eq 0
+          echo "=== A+K+B-core complete: failures=$failures/5 ==="
+          test "$failures" -eq 0
 
       - name: Preserve experiment logs
         if: always()
@@ -501,4 +657,5 @@ jobs:
             /tmp/moveit_ws/log
             /tmp/staubli_ws/log
             /tmp/staubli_ws/k-only-pruning-*.log
+            /tmp/staubli_ws/a-k-b-core-*.log
           if-no-files-found: ignore
