@@ -29,203 +29,15 @@ jobs:
           source /opt/ros/jazzy/setup.bash
           rosdep update --rosdistro jazzy
 
-      - name: Fetch and build unmodified ROS 2 Jazzy rclcpp overlay (no ASan)
+      - name: Fetch and build stock ROS 2 Jazzy rclcpp overlay (no ASan, no source instrumentation)
         shell: bash
         run: |
           set -eo pipefail
           source /opt/ros/jazzy/setup.bash
           mkdir -p /tmp/rclcpp_ws/src
           git clone --depth 1 --branch jazzy https://github.com/ros2/rclcpp.git /tmp/rclcpp_ws/src/rclcpp
-          python3 - <<'PY'
-          from pathlib import Path
-
-          root = Path("/tmp/rclcpp_ws/src/rclcpp/rclcpp/src/rclcpp")
-          required = [
-              root / "callback_group.cpp",
-              root / "guard_condition.cpp",
-              root / "executors" / "executor_notify_waitable.cpp",
-          ]
-          missing = [str(path) for path in required if not path.is_file()]
-          if missing:
-              raise SystemExit(f"Expected Jazzy rclcpp sources missing: {missing}")
-          # Add CI-only lifecycle markers to the temporary rclcpp overlay.
-          executor_path = root / "executor.cpp"
-          executor_source = executor_path.read_text()
-          if "#include <cstdio>" not in executor_source:
-              executor_source = executor_source.replace(
-                  "#include <cassert>\n",
-                  "#include <cassert>\n#include <cstdio>\n",
-                  1,
-              )
-          executor_begin = (
-              "Executor::~Executor()\n"
-              "{\n"
-              "  std::lock_guard<std::mutex> guard(mutex_);"
-          )
-          executor_begin_marked = (
-              "Executor::~Executor()\n"
-              "{\n"
-              "  std::fprintf(stderr, \"[LIFECYCLE] Executor dtor body BEGIN\\n\");\n"
-              "  std::fflush(stderr);\n"
-              "  std::lock_guard<std::mutex> guard(mutex_);"
-          )
-          if executor_source.count(executor_begin) != 1:
-              raise SystemExit("Expected exactly one Executor destructor entry; refusing to instrument.")
-          executor_source = executor_source.replace(executor_begin, executor_begin_marked, 1)
-          executor_end = (
-              "  if (!context_->remove_on_shutdown_callback(shutdown_callback_handle_)) {\n"
-              "    RCUTILS_LOG_ERROR_NAMED(\n"
-              "      \"rclcpp\",\n"
-              "      \"failed to remove registered on_shutdown callback\");\n"
-              "    rcl_reset_error();\n"
-              "  }\n"
-              "}"
-          )
-          executor_end_marked = (
-              "  if (!context_->remove_on_shutdown_callback(shutdown_callback_handle_)) {\n"
-              "    RCUTILS_LOG_ERROR_NAMED(\n"
-              "      \"rclcpp\",\n"
-              "      \"failed to remove registered on_shutdown callback\");\n"
-              "    rcl_reset_error();\n"
-              "  }\n"
-              "  std::fprintf(stderr, \"[LIFECYCLE] Executor dtor body END; WaitSet member destruction follows\\n\");\n"
-              "  std::fflush(stderr);\n"
-              "}"
-          )
-          if executor_source.count(executor_end) != 1:
-              raise SystemExit("Expected exactly one Executor destructor exit; refusing to instrument.")
-          executor_source = executor_source.replace(executor_end, executor_end_marked, 1)
-          executor_path.write_text(executor_source)
-
-          # Instrument each weak Waitable release in CallbackGroup's destructor.
-          callback_group_path = root / "callback_group.cpp"
-          callback_group_source = callback_group_path.read_text()
-          if "#include <cstdio>" not in callback_group_source:
-              callback_group_source = "#include <cstdio>\n" + callback_group_source
-          callback_group_old = (
-              "CallbackGroup::~CallbackGroup()\n"
-              "{\n"
-              "  trigger_notify_guard_condition();\n"
-              "}"
-          )
-          callback_group_new = (
-              "CallbackGroup::~CallbackGroup()\n"
-              "{\n"
-              "  std::fprintf(stderr, \"[LIFECYCLE] CallbackGroup dtor BEGIN this=%p waitables=%zu\\n\", "
-              "static_cast<void *>(this), waitable_ptrs_.size());\n"
-              "  std::fflush(stderr);\n"
-              "  trigger_notify_guard_condition();\n"
-              "  while (!waitable_ptrs_.empty()) {\n"
-              "    const std::size_t slot = waitable_ptrs_.size() - 1;\n"
-              "    auto & weak_waitable = waitable_ptrs_.back();\n"
-              "    std::fprintf(stderr, \"[LIFECYCLE] CallbackGroup weak Waitable release BEGIN slot=%zu expired=%d use_count=%ld\\n\", "
-              "slot, weak_waitable.expired() ? 1 : 0, weak_waitable.use_count());\n"
-              "    std::fflush(stderr);\n"
-              "    weak_waitable.reset();\n"
-              "    std::fprintf(stderr, \"[LIFECYCLE] CallbackGroup weak Waitable release END slot=%zu\\n\", slot);\n"
-              "    std::fflush(stderr);\n"
-              "    waitable_ptrs_.pop_back();\n"
-              "  }\n"
-              "  std::fprintf(stderr, \"[LIFECYCLE] CallbackGroup dtor weak Waitables CLEARED this=%p\\n\", "
-              "static_cast<void *>(this));\n"
-              "  std::fflush(stderr);\n"
-              "}"
-          )
-          if callback_group_source.count(callback_group_old) != 1:
-              raise SystemExit("Expected exactly one CallbackGroup destructor anchor; refusing to instrument.")
-          callback_group_source = callback_group_source.replace(callback_group_old, callback_group_new, 1)
-
-          # The prior counter-test showed that pruning CallbackGroup entries alone
-          # does not fix teardown. Keep stock remove_waitable() unchanged and trace
-          # the separate weak entries owned by Executor::WaitSet DynamicStorage.
-          callback_group_path.write_text(callback_group_source)
-
-          dynamic_storage_path = Path(
-              "/tmp/rclcpp_ws/src/rclcpp/rclcpp/include/rclcpp/wait_set_policies/dynamic_storage.hpp"
-          )
-          dynamic_storage_source = dynamic_storage_path.read_text()
-          if "#include <cstdio>" not in dynamic_storage_source:
-              dynamic_storage_source = dynamic_storage_source.replace(
-                  "#include <algorithm>\n",
-                  "#include <algorithm>\n#include <cstdio>\n",
-                  1,
-              )
-
-          weak_entry_expired_anchor = (
-              "    bool\n"
-              "    expired() const noexcept\n"
-              "    {\n"
-              "      return waitable.expired();\n"
-              "    }\n"
-          )
-          weak_entry_instrumented = (
-              "    ~WeakWaitableEntry()\n"
-              "    {\n"
-              "      std::fprintf(stderr, \"[LIFECYCLE] WaitSet WeakWaitableEntry dtor BEGIN entry=%p waitable_expired=%d waitable_use_count=%ld associated_expired=%d associated_use_count=%ld\\n\", "
-              "        static_cast<void *>(this), waitable.expired() ? 1 : 0, waitable.use_count(), "
-              "        associated_entity.expired() ? 1 : 0, associated_entity.use_count());\n"
-              "      std::fflush(stderr);\n"
-              "      associated_entity.reset();\n"
-              "      std::fprintf(stderr, \"[LIFECYCLE] WaitSet WeakWaitableEntry associated reset END entry=%p\\n\", static_cast<void *>(this));\n"
-              "      std::fflush(stderr);\n"
-              "      waitable.reset();\n"
-              "      std::fprintf(stderr, \"[LIFECYCLE] WaitSet WeakWaitableEntry waitable reset END entry=%p\\n\", static_cast<void *>(this));\n"
-              "      std::fflush(stderr);\n"
-              "    }\n"
-          )
-          if dynamic_storage_source.count(weak_entry_expired_anchor) != 1:
-              raise SystemExit("Expected exactly one DynamicStorage::WeakWaitableEntry expired() anchor.")
-          dynamic_storage_source = dynamic_storage_source.replace(
-              weak_entry_expired_anchor,
-              weak_entry_expired_anchor + weak_entry_instrumented,
-              1,
-          )
-          if dynamic_storage_source.count("WaitSet WeakWaitableEntry dtor BEGIN") != 1:
-              raise SystemExit("WaitSet weak-entry destructor marker validation failed.")
-          dynamic_storage_path.write_text(dynamic_storage_source)
-          callback_group_path.write_text(callback_group_source)
-          print("Added CI-only WaitSet weak-entry release markers; CallbackGroup::remove_waitable remains stock.")
-
-          # NodeBase destructor body ends before its members (including the default group)
-          # are destroyed; these markers make that boundary explicit.
-          node_base_path = root / "node_interfaces" / "node_base.cpp"
-          node_base_source = node_base_path.read_text()
-          if "#include <cstdio>" not in node_base_source:
-              node_base_source = "#include <cstdio>\n" + node_base_source
-          node_base_old = (
-              "NodeBase::~NodeBase()\n"
-              "{\n"
-              "  // Finalize the interrupt guard condition after removing self from graph listener.\n"
-              "  {\n"
-              "    std::lock_guard<std::recursive_mutex> notify_condition_lock(notify_guard_condition_mutex_);\n"
-              "    notify_guard_condition_is_valid_ = false;\n"
-              "  }\n"
-              "}"
-          )
-          node_base_new = (
-              "NodeBase::~NodeBase()\n"
-              "{\n"
-              "  std::fprintf(stderr, \"[LIFECYCLE] NodeBase dtor BEGIN this=%p default_group=%p default_use_count=%ld weak_groups=%zu\\n\", "
-              "static_cast<void *>(this), static_cast<void *>(default_callback_group_.get()), "
-              "default_callback_group_.use_count(), callback_groups_.size());\n"
-              "  std::fflush(stderr);\n"
-              "  // Finalize the interrupt guard condition after removing self from graph listener.\n"
-              "  {\n"
-              "    std::lock_guard<std::recursive_mutex> notify_condition_lock(notify_guard_condition_mutex_);\n"
-              "    notify_guard_condition_is_valid_ = false;\n"
-              "  }\n"
-              "  std::fprintf(stderr, \"[LIFECYCLE] NodeBase dtor BODY END this=%p; members follow\\n\", "
-              "static_cast<void *>(this));\n"
-              "  std::fflush(stderr);\n"
-              "}"
-          )
-          if node_base_source.count(node_base_old) != 1:
-              raise SystemExit("Expected exactly one NodeBase destructor anchor; refusing to instrument.")
-          node_base_source = node_base_source.replace(node_base_old, node_base_new, 1)
-          node_base_path.write_text(node_base_source)
-
-          print("Applied CI-only Executor, CallbackGroup weak-Waitable, expired-entry pruning, and NodeBase lifecycle markers; upstream repository remains untouched.")
-          PY
+          git -C /tmp/rclcpp_ws/src/rclcpp diff --exit-code
+          echo "Using pristine ROS 2 Jazzy rclcpp sources; no Executor, CallbackGroup, NodeBase, or DynamicStorage instrumentation."
           rosdep install --from-paths /tmp/rclcpp_ws/src/rclcpp/rclcpp --ignore-src --rosdistro jazzy -y
           cd /tmp/rclcpp_ws
           colcon build --packages-select rclcpp --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_FLAGS='-O1 -g -fno-omit-frame-pointer' -DCMAKE_CXX_FLAGS='-O1 -g -fno-omit-frame-pointer' -DBUILD_TESTING=OFF
@@ -552,7 +364,7 @@ jobs:
           cd /tmp/staubli_ws
           colcon build --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_FLAGS='-O1 -g -fno-omit-frame-pointer' -DCMAKE_CXX_FLAGS='-O1 -g -fno-omit-frame-pointer' -DBUILD_TESTING=ON
 
-      - name: Run A+K mock execution and B-core WaitSet teardown regression
+      - name: Run uninstrumented A+K+B-core mock teardown regression (10 repetitions)
         shell: bash
         run: |
           set -eo pipefail
@@ -565,12 +377,17 @@ jobs:
           package_prefix="$(ros2 pkg prefix staubli_moveit_config)"
           test -d "$package_prefix"
           colcon list --base-paths src | awk '{print $1}' | grep -Fx "staubli_moveit_config"
-          echo "Test workspace preflight passed: package=staubli_moveit_config prefix=$package_prefix workspace=/tmp/staubli_ws"
-          echo "Running A+K with B core cleanup only; CallbackGroup pruning and event-callback cleanup are disabled."
+          git -C /tmp/rclcpp_ws/src/rclcpp diff --exit-code
+          if grep -R -E 'WaitSet WeakWaitableEntry dtor BEGIN|CallbackGroup dtor BEGIN|NodeBase dtor BEGIN|Executor dtor body BEGIN' /tmp/rclcpp_ws/src/rclcpp/rclcpp; then
+            echo "Unexpected CI lifecycle instrumentation remains in rclcpp source."
+            exit 1
+          fi
+          echo "Test workspace preflight passed: package=staubli_moveit_config prefix=$package_prefix; rclcpp source pristine."
+          echo "Running A+K+B-core cleanup treatment with stock rclcpp runtime semantics."
           failures=0
-          for iteration in 1 2 3 4 5; do
-            echo "=== A+K+B-core repetition $iteration/5 ==="
-            output_log="/tmp/staubli_ws/a-k-b-core-$iteration.log"
+          for iteration in $(seq 1 10); do
+            echo "=== A+K+B-core clean repetition $iteration/10 ==="
+            output_log="/tmp/staubli_ws/a-k-b-core-clean-$iteration.log"
             set +e
             colcon test --packages-select staubli_moveit_config --event-handlers console_direct+ --return-code-on-test-failure 2>&1 | tee "$output_log"
             test_rc=$?
@@ -580,17 +397,18 @@ jobs:
             result_rc=$?
             set -e
             set +e
-            python3 - "$output_log" <<'PY' 
+            python3 - "$output_log" <<'PY'
           from pathlib import Path
           import sys
 
           lines = Path(sys.argv[1]).read_text(errors="replace").splitlines()
           markers = [
               "shutdown core-B: private executor reset BEGIN",
+              "shutdown core-B: private executor node removed",
               "shutdown core-B: private executor reset END",
               "shutdown core-B: controller manager reset BEGIN",
               "shutdown core-B: controller manager reset END",
-              "shutdown core-B: controller node reset BEGIN",
+              "shutdown core-B: controller node reset BEGIN use_count=1",
               "shutdown core-B: controller node reset END",
               "shutdown core-B: controller-manager loader reset BEGIN",
               "shutdown core-B: controller-manager loader reset END",
@@ -604,46 +422,45 @@ jobs:
           if positions != sorted(positions):
               raise SystemExit(f"B-core teardown markers out of order: {positions}")
 
-          private_executor_begin, private_executor_end = positions[0], positions[1]
-          weak_begin = [
-              i for i, line in enumerate(lines)
-              if "[LIFECYCLE] WaitSet WeakWaitableEntry dtor BEGIN" in line
-          ]
-          if not any(private_executor_begin < i < private_executor_end for i in weak_begin):
-              raise SystemExit("No WaitSet WeakWaitableEntry destruction occurred inside private_executor_.reset().")
-
           action_successes = sum(
               "Completed trajectory execution with status SUCCEEDED" in line
               for line in lines
           )
-          if action_successes < 1:
-              raise SystemExit("No successful mock plan-and-execute result was observed.")
-          if not any("Ran 1 test in" in line for line in lines):
-              raise SystemExit("The post-shutdown launch test did not execute.")
-          waitable_release_count = sum(
-              "[LIFECYCLE] WaitSet WeakWaitableEntry waitable reset END" in line
+          if action_successes != 1:
+              raise SystemExit(f"Expected exactly one successful mock execution, observed {action_successes}")
+          launch_tests = sum("Ran 1 test in" in line for line in lines)
+          if launch_tests != 1:
+              raise SystemExit(f"Expected one launch test execution, observed {launch_tests}")
+          passing_summaries = sum(
+              "Summary: 7 tests, 0 errors, 0 failures, 0 skipped" in line
               for line in lines
           )
-          associated_release_count = sum(
-              "[LIFECYCLE] WaitSet WeakWaitableEntry associated reset END" in line
+          if passing_summaries != 1:
+              raise SystemExit(f"Expected one clean 7-test summary, observed {passing_summaries}")
+          if any(
+              "Segmentation fault" in line or "exit code -11" in line
               for line in lines
-          )
+          ):
+              raise SystemExit("Detected a segmentation fault or SIGSEGV exit.")
+          if any(
+              "test_all_processes_exit_cleanly" in lines[i] and "FAIL" in lines[i]
+              for i in range(len(lines))
+          ):
+              raise SystemExit("Post-shutdown process-exit assertion failed.")
           print(
-              f"B-core lifecycle order verified; waitable_release_markers={waitable_release_count}; "
-              f"associated_release_markers={associated_release_count}; mock_execution_successes={action_successes}"
+              "Uninstrumented B-core order verified; one mock execution succeeded; "
+              "one launch test and all seven test assertions passed."
           )
           PY
             order_rc=$?
             set -e
-            waitable_release_count="$(grep -cF '[LIFECYCLE] WaitSet WeakWaitableEntry waitable reset END' "$output_log" || true)"
-            associated_release_count="$(grep -cF '[LIFECYCLE] WaitSet WeakWaitableEntry associated reset END' "$output_log" || true)"
-            echo "=== Repetition $iteration/5 exit summary: colcon_test=$test_rc, test_result=$result_rc, lifecycle_order=$order_rc, waitable_release_markers=$waitable_release_count, associated_release_markers=$associated_release_count ==="
-            if [ "$test_rc" -ne 0 ] || [ "$result_rc" -ne 0 ] || [ "$order_rc" -ne 0 ] || [ "$waitable_release_count" -eq 0 ]; then
+            echo "=== Clean repetition $iteration/10 exit summary: colcon_test=$test_rc, test_result=$result_rc, lifecycle_order=$order_rc ==="
+            if [ "$test_rc" -ne 0 ] || [ "$result_rc" -ne 0 ] || [ "$order_rc" -ne 0 ]; then
               failures=$((failures + 1))
-              echo "Repetition $iteration/5 failed lifecycle ordering, execution, test, or teardown acceptance."
+              echo "Clean repetition $iteration/10 failed acceptance."
             fi
           done
-          echo "=== A+K+B-core complete: failures=$failures/5 ==="
+          echo "=== A+K+B-core uninstrumented complete: failures=$failures/10 ==="
           test "$failures" -eq 0
 
       - name: Preserve experiment logs
@@ -657,4 +474,5 @@ jobs:
             /tmp/staubli_ws/log
             /tmp/staubli_ws/k-only-pruning-*.log
             /tmp/staubli_ws/a-k-b-core-*.log
+            /tmp/staubli_ws/a-k-b-core-clean-*.log
           if-no-files-found: ignore
