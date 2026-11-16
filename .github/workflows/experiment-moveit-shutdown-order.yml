@@ -460,6 +460,11 @@ jobs:
           source /tmp/moveit_ws/install/setup.bash
           source /tmp/staubli_ws/install/setup.bash
           unset LD_PRELOAD ASAN_OPTIONS
+          cd /tmp/staubli_ws
+          package_prefix="$(ros2 pkg prefix staubli_moveit_config)"
+          test -d "${package_prefix}"
+          colcon list --base-paths src | awk '{print $1}' | grep -Fx "staubli_moveit_config"
+          echo "Test workspace preflight passed: package=staubli_moveit_config prefix=${package_prefix} workspace=/tmp/staubli_ws"
           echo "Running K-only mock plan-and-execute with A/B disabled and rclcpp expired-weak-entry pruning as the sole functional treatment."
           failures=0
           total_prunes=0
