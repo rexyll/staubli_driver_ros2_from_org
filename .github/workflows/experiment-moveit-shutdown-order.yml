@@ -879,13 +879,13 @@ jobs:
                   return false;
                 }
                 std::fprintf(stderr, "[STAUBLI_ACTIVE_PROBE] SLOW_RESUME pipeline=%p active=%d probe_inflight=%d\\n",
-                             static_cast<const void*>(this), active_.load() ? 1 : 0, staubli_probe_inflight.load());
+                             static_cast<const void*>(this), isActive() ? 1 : 0, staubli_probe_inflight.load());
                 std::fflush(stderr);
                 if (staubli_terminate_probe_enabled)
                 {
                   node_->set_parameter(rclcpp::Parameter("staubli_test_slow_held", true));
                   std::fprintf(stderr, "[STAUBLI_TERMINATE_PROBE] SLOW_HELD active=%d\\n",
-                               active_.load() ? 1 : 0);
+                               isActive() ? 1 : 0);
                   std::fflush(stderr);
                   bool release_slow = false;
                   const auto release_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
@@ -941,7 +941,7 @@ jobs:
                 std::lock_guard<std::mutex> probe_lock(staubli_probe_mutex);
                 std::fprintf(stderr,
                              "[STAUBLI_ACTIVE_PROBE] FAST_EXIT pipeline=%p active=%d probe_inflight=%d slow_inflight=%d\\n",
-                             static_cast<const void*>(this), active_.load() ? 1 : 0,
+                             static_cast<const void*>(this), isActive() ? 1 : 0,
                              staubli_probe_inflight.load(), staubli_probe_slow_entered ? 1 : 0);
                 std::fflush(stderr);
                 staubli_probe_fast_finished = true;
@@ -1468,7 +1468,7 @@ jobs:
                   rclpy.spin_until_future_complete(self.node, plan_future, timeout_sec=120.0)
                   self.assertTrue(plan_future.done(), "PlanService concurrent request timed out")
 
-                  # The server parks the slow request after the fast request has cleared active_.
+                  # The fast PlanService request completes while the slow SequenceService request remains active.
                   status_client = self.node.create_client(Trigger, "/staubli_test_probe_status")
                   self.assertTrue(status_client.wait_for_service(timeout_sec=120.0))
                   slow_held = False
@@ -1961,14 +1961,14 @@ jobs:
               r"FAST_EXIT pipeline=(0x[0-9a-fA-F]+) active=(\d+) probe_inflight=(\d+) slow_inflight=(\d+)",
               probe_markers["FAST_EXIT"],
           )
-          if not fast_exit or fast_exit.group(2) != "0" or fast_exit.group(3) != "1" or fast_exit.group(4) != "1":
-              raise SystemExit(f"Fast completion did not observe active=0 while one slow call remained: {probe_markers['FAST_EXIT']}")
+          if not fast_exit or fast_exit.group(2) != "1" or fast_exit.group(3) != "1" or fast_exit.group(4) != "1":
+              raise SystemExit(f"Fast completion did not preserve active=1 while one slow call remained: {probe_markers['FAST_EXIT']}")
           slow_resume = re.search(
               r"SLOW_RESUME pipeline=(0x[0-9a-fA-F]+) active=(\d+) probe_inflight=(\d+)",
               probe_markers["SLOW_RESUME"],
           )
-          if not slow_resume or slow_resume.group(2) != "0" or slow_resume.group(3) != "1":
-              raise SystemExit(f"Slow request did not resume with active=0/probe_inflight=1: {probe_markers['SLOW_RESUME']}")
+          if not slow_resume or slow_resume.group(2) != "1" or slow_resume.group(3) != "1":
+              raise SystemExit(f"Slow request did not resume with active=1/probe_inflight=1: {probe_markers['SLOW_RESUME']}")
           # Runtime pipeline map is the authority for this process; do not infer IDs from config files alone.
           pipeline_map_lines = [line for line in lines if "[STAUBLI_PIPELINE_MAP] " in line]
           pipeline_ids = {
@@ -1987,11 +1987,11 @@ jobs:
           if len(client_pass) != 1:
               raise SystemExit(f"Expected one successful concurrent service-client + terminate-wrapper assertion, observed {len(client_pass)}")
           slow_held = [line for line in lines if "[STAUBLI_TERMINATE_PROBE] SLOW_HELD " in line]
-          if len(slow_held) != 1 or not re.search(r"active=0", slow_held[0]):
-              raise SystemExit(f"Slow call was not held in the active=false window: {slow_held}")
+          if len(slow_held) != 1 or not re.search(r"active=1", slow_held[0]):
+              raise SystemExit(f"Slow call was not held while its pipeline-owned request remained active: {slow_held}")
           wrapper_calls = [line for line in lines if "[STAUBLI_TERMINATE_PROBE] WRAPPER_RETURN " in line]
-          if len(wrapper_calls) != 1 or not re.search(r"active_before=0 result=1", wrapper_calls[0]):
-              raise SystemExit(f"Expected MoveItCpp wrapper to return with active_before=0: {wrapper_calls}")
+          if len(wrapper_calls) != 1 or not re.search(r"active_before=1 result=1", wrapper_calls[0]):
+              raise SystemExit(f"Expected MoveItCpp wrapper to observe the remaining active request: {wrapper_calls}")
           terminate_entries = [line for line in lines if "[STAUBLI_TERMINATE_PROBE] PIPELINE_TERMINATE_ENTER " in line]
           cross_held = [line for line in lines if "[STAUBLI_CROSS_PIPELINE] A_OMPL_HELD " in line]
           cross_context = [line for line in lines if "[STAUBLI_CROSS_PIPELINE] B_CONTEXT_CREATED " in line]
