@@ -679,7 +679,7 @@ jobs:
                   "#include <memory>\n#include <mutex>\n#include <vector>\n",
                   1
               )
-          old_active_accessor = "  [[nodiscard]] bool isActive() const\\n  {\\n    return active_;\\n  }"
+          old_active_accessor = "  [[nodiscard]] bool isActive() const\n  {\n    return active_;\n  }"
           if pipeline_header.count(old_active_accessor) != 1:
               raise SystemExit("Expected one PlanningPipeline isActive accessor.")
           pipeline_header = pipeline_header.replace(
