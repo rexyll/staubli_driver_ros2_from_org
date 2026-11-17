@@ -1080,7 +1080,7 @@ jobs:
           }
           }  // namespace planning_pipeline"""
           pipeline_source, terminate_count = re.subn(
-              terminate_pattern, terminate_replacement, pipeline_source, count=1, flags=re.DOTALL
+              terminate_pattern, lambda _match: terminate_replacement, pipeline_source, count=1, flags=re.DOTALL
           )
           if terminate_count != 1:
               raise SystemExit("Could not replace global PlannerManager terminate fan-out.")
