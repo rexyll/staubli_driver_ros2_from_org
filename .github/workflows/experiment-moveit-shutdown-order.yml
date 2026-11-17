@@ -101,7 +101,8 @@ jobs:
                   raise SystemExit("Could not locate unique MoveGroup include insertion anchor.")
               source = source.replace(
                   "#include <memory>\n",
-                  "#include <cstdlib>\n#include <cstdio>\n#include <memory>\n"
+                  "#include <atomic>\n#include <chrono>\n#include <cstdlib>\n#include <cstdio>\n"
+                  "#include <memory>\n#include <thread>\n"
                   "#include <moveit/planning_interface/planning_interface.hpp>\n"
                   "#include <moveit_msgs/msg/constraints.hpp>\n"
                   "#include <moveit_msgs/msg/joint_constraint.hpp>\n"
@@ -230,15 +231,68 @@ jobs:
                     nh->set_parameter(rclcpp::Parameter("staubli_test_release_cross_pipeline", true));
                     return;
                   }
+                  auto* solve_barrier =
+                      dynamic_cast<planning_interface::StaubliSolveBarrierProbe*>(target_context.get());
+                  if (!solve_barrier)
+                  {
+                    response->success = false;
+                    response->message = "Pilz context does not expose the CI-only solve barrier";
+                    nh->set_parameter(rclcpp::Parameter("staubli_test_release_cross_pipeline", true));
+                    return;
+                  }
                   std::fprintf(stderr,
                                "[STAUBLI_CROSS_PIPELINE] B_CONTEXT_CREATED manager=%p context=%p A_active=%d\\n",
                                static_cast<const void*>(planner_manager.get()),
                                static_cast<const void*>(target_context.get()), active_before ? 1 : 0);
                   std::fflush(stderr);
+                  solve_barrier->armStaubliSolveBarrier();
+                  std::atomic_bool inflight_solve_done{ false };
+                  planning_interface::MotionPlanResponse inflight_response;
+                  std::thread inflight_solve_thread([target_context, &inflight_response, &inflight_solve_done]() {
+                    target_context->solve(inflight_response);
+                    inflight_solve_done.store(true);
+                  });
+                  const auto solve_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+                  while (!solve_barrier->staubliSolveBarrierEntered() &&
+                         std::chrono::steady_clock::now() < solve_deadline)
+                  {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                  }
+                  const bool inflight_entered = solve_barrier->staubliSolveBarrierEntered();
+                  if (!inflight_entered)
+                  {
+                    solve_barrier->releaseStaubliSolveBarrier();
+                    if (inflight_solve_thread.joinable())
+                      inflight_solve_thread.join();
+                    response->success = false;
+                    response->message = "Pilz solve did not enter the deterministic in-flight barrier";
+                    nh->set_parameter(rclcpp::Parameter("staubli_test_release_cross_pipeline", true));
+                    return;
+                  }
+                  std::fprintf(stderr, "[STAUBLI_PILZ_INFLIGHT] SOLVE_ENTERED context=%p\\n",
+                               static_cast<const void*>(target_context.get()));
+                  std::fflush(stderr);
                   const bool wrapper_result = moveit_cpp->terminatePlanningPipeline("ompl");
                   std::fprintf(stderr,
                                "[STAUBLI_CROSS_PIPELINE] A_WRAPPER_RETURN active_before=%d result=%d\\n",
                                active_before ? 1 : 0, wrapper_result ? 1 : 0);
+                  std::fflush(stderr);
+                  const bool inflight_done_while_held = inflight_solve_done.load();
+                  const bool terminated_while_held = solve_barrier->staubliContextTerminated();
+                  std::fprintf(stderr,
+                               "[STAUBLI_PILZ_INFLIGHT] TERMINATE_OBSERVED context=%p terminated=%d solve_done=%d\\n",
+                               static_cast<const void*>(target_context.get()), terminated_while_held ? 1 : 0,
+                               inflight_done_while_held ? 1 : 0);
+                  std::fflush(stderr);
+                  solve_barrier->releaseStaubliSolveBarrier();
+                  if (inflight_solve_thread.joinable())
+                    inflight_solve_thread.join();
+                  const bool inflight_success =
+                      inflight_response.error_code.val == moveit_msgs::msg::MoveItErrorCodes::SUCCESS;
+                  std::fprintf(stderr,
+                               "[STAUBLI_PILZ_INFLIGHT] SOLVE_RELEASED context=%p success=%d code=%d\\n",
+                               static_cast<const void*>(target_context.get()), inflight_success ? 1 : 0,
+                               inflight_response.error_code.val);
                   std::fflush(stderr);
                   planning_interface::MotionPlanResponse target_response;
                   target_context->solve(target_response);
@@ -267,10 +321,16 @@ jobs:
                                  control_response.error_code.val);
                     std::fflush(stderr);
                   }
-                  response->success = active_before && wrapper_result && target_rejected && control_success;
+                  response->success = active_before && wrapper_result && inflight_entered &&
+                                      !inflight_done_while_held && terminated_while_held &&
+                                      inflight_success && target_rejected && control_success;
                   response->message =
                       "active=" + std::to_string(active_before) +
                       " wrapper=" + std::to_string(wrapper_result) +
+                      " inflight_entered=" + std::to_string(inflight_entered) +
+                      " inflight_done_while_held=" + std::to_string(inflight_done_while_held) +
+                      " terminated=" + std::to_string(terminated_while_held) +
+                      " inflight_success=" + std::to_string(inflight_success) +
                       " target_rejected=" + std::to_string(target_rejected) +
                       " control_success=" + std::to_string(control_success);
                   const auto release_result =
@@ -292,6 +352,9 @@ jobs:
               and "staubli_test_probe_status" in source
               and "CallbackGroupType::Reentrant" in source
               and "staubli_probe_status_service" in source
+              and "StaubliSolveBarrierProbe" in planning_interface_source
+              and "armStaubliSolveBarrier" in pilz_context_source
+              and "staubli_solve_barrier_entered_" in pilz_context_source
               and "terminatePlanningPipeline" in source
           ):
               raise SystemExit("MoveItCpp terminate-probe service static validation failed.") 
@@ -862,14 +925,103 @@ jobs:
               raise SystemExit("PlanningPipeline active-probe final validation failed.")
           print("Applied environment-gated, timeout-protected PlanningPipeline overlap probe to temporary MoveIt overlay.")
 
+          planning_interface_path = Path(
+              "/tmp/moveit_ws/src/moveit2/moveit_core/planning_interface/include/moveit/planning_interface/planning_interface.hpp"
+          )
+          planning_interface_source = planning_interface_path.read_text()
+          probe_interface_anchor = "MOVEIT_CLASS_FORWARD(PlanningContext);"
+          probe_interface = """class StaubliSolveBarrierProbe
+          {
+          public:
+            virtual ~StaubliSolveBarrierProbe() = default;
+            virtual void armStaubliSolveBarrier() = 0;
+            virtual bool staubliSolveBarrierEntered() const = 0;
+            virtual void releaseStaubliSolveBarrier() = 0;
+            virtual bool staubliContextTerminated() const = 0;
+          };
+
+          """
+          if planning_interface_source.count(probe_interface_anchor) != 1:
+              raise SystemExit("Expected one PlanningContext forward-declaration anchor.")
+          if "class StaubliSolveBarrierProbe" not in planning_interface_source:
+              planning_interface_source = planning_interface_source.replace(
+                  probe_interface_anchor, probe_interface + probe_interface_anchor, 1
+              )
+          planning_interface_path.write_text(planning_interface_source)
+
           pilz_context_path = Path(
               "/tmp/moveit_ws/src/moveit2/moveit_planners/pilz_industrial_motion_planner/include/pilz_industrial_motion_planner/planning_context_base.hpp"
           )
           pilz_context_source = pilz_context_path.read_text()
           if "#include <cstdio>" not in pilz_context_source:
               pilz_context_source = pilz_context_source.replace(
-                  "#include <atomic>\n", "#include <atomic>\n#include <cstdio>\n", 1
+                  "#include <atomic>\n",
+                  "#include <atomic>\n#include <chrono>\n#include <cstdio>\n#include <thread>\n",
+                  1
               )
+          if "public planning_interface::StaubliSolveBarrierProbe" not in pilz_context_source:
+              class_anchor = "class PlanningContextBase : public planning_interface::PlanningContext"
+              if pilz_context_source.count(class_anchor) != 1:
+                  raise SystemExit("Expected one Pilz PlanningContextBase inheritance anchor.")
+              pilz_context_source = pilz_context_source.replace(
+                  class_anchor,
+                  "class PlanningContextBase : public planning_interface::PlanningContext,\n"
+                  "                              public planning_interface::StaubliSolveBarrierProbe",
+                  1
+              )
+              method_anchor = "  bool terminate() override;\n"
+              probe_methods = """  bool terminate() override;
+
+            void armStaubliSolveBarrier() override
+            {
+              staubli_solve_barrier_entered_.store(false);
+              staubli_solve_barrier_release_.store(false);
+              staubli_solve_barrier_armed_.store(true);
+            }
+
+            bool staubliSolveBarrierEntered() const override
+            {
+              return staubli_solve_barrier_entered_.load();
+            }
+
+            void releaseStaubliSolveBarrier() override
+            {
+              staubli_solve_barrier_release_.store(true);
+            }
+
+            bool staubliContextTerminated() const override
+            {
+              return terminated_.load();
+            }
+          """
+              if pilz_context_source.count(method_anchor) != 1:
+                  raise SystemExit("Expected one Pilz terminate declaration anchor.")
+              pilz_context_source = pilz_context_source.replace(method_anchor, probe_methods, 1)
+              solve_anchor = "  generator_.generate(getPlanningScene(), request_, res);"
+              solve_probe = """  if (staubli_solve_barrier_armed_.exchange(false))
+            {
+              staubli_solve_barrier_entered_.store(true);
+              const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+              while (!staubli_solve_barrier_release_.load() &&
+                     std::chrono::steady_clock::now() < deadline)
+              {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+              }
+            }
+            generator_.generate(getPlanningScene(), request_, res);"""
+              if pilz_context_source.count(solve_anchor) != 1:
+                  raise SystemExit("Expected one Pilz generator invocation anchor.")
+              pilz_context_source = pilz_context_source.replace(solve_anchor, solve_probe, 1)
+              field_anchor = "  GeneratorT generator_;"
+              probe_fields = """  std::atomic_bool staubli_solve_barrier_armed_{ false };
+            std::atomic_bool staubli_solve_barrier_entered_{ false };
+            std::atomic_bool staubli_solve_barrier_release_{ false };
+
+          protected:
+            GeneratorT generator_;"""
+              if pilz_context_source.count(field_anchor) != 1:
+                  raise SystemExit("Expected one Pilz generator member anchor.")
+              pilz_context_source = pilz_context_source.replace(field_anchor, probe_fields, 1)
           old_pilz_terminate = """bool pilz_industrial_motion_planner::PlanningContextBase<GeneratorT>::terminate()
           {
             RCLCPP_DEBUG_STREAM(rclcpp::get_logger("moveit.pilz_industrial_motion_planner.planning_context_base"),
@@ -1173,6 +1325,10 @@ jobs:
                       f"Cross-pipeline context assertions failed: {terminate_response.message}",
                   )
                   self.assertIn("active=1", terminate_response.message)
+                  self.assertIn("inflight_entered=1", terminate_response.message)
+                  self.assertIn("inflight_done_while_held=0", terminate_response.message)
+                  self.assertIn("terminated=1", terminate_response.message)
+                  self.assertIn("inflight_success=1", terminate_response.message)
                   self.assertIn("target_rejected=1", terminate_response.message)
                   self.assertIn("control_success=1", terminate_response.message)
                   rclpy.spin_until_future_complete(self.node, plan_future, timeout_sec=120.0)
@@ -1180,7 +1336,7 @@ jobs:
                   plan_response = plan_future.result()
                   self.assertEqual(plan_response.motion_plan_response.error_code.val, MoveItErrorCodes.SUCCESS)
                   self.assertTrue(plan_response.motion_plan_response.trajectory.joint_trajectory.points)
-                  print("[STAUBLI_CROSS_PIPELINE_CLIENT] PASS active_ompl=1 pilz_target=PLANNING_FAILED control=SUCCESS")
+                  print("[STAUBLI_CROSS_PIPELINE_CLIENT] PASS active_ompl=1 pilz_inflight=SUCCESS post_terminate_target=PLANNING_FAILED control=SUCCESS")
           '''
 
           method = '''
@@ -1598,19 +1754,25 @@ jobs:
           cross_wrapper = [line for line in lines if "[STAUBLI_CROSS_PIPELINE] A_WRAPPER_RETURN " in line]
           cross_target = [line for line in lines if "[STAUBLI_CROSS_PIPELINE] B_TARGET_SOLVE " in line]
           cross_control = [line for line in lines if "[STAUBLI_CROSS_PIPELINE] B_CONTROL_SOLVE " in line]
+          inflight_entered = [line for line in lines if "[STAUBLI_PILZ_INFLIGHT] SOLVE_ENTERED " in line]
+          inflight_terminated = [line for line in lines if "[STAUBLI_PILZ_INFLIGHT] TERMINATE_OBSERVED " in line]
+          inflight_released = [line for line in lines if "[STAUBLI_PILZ_INFLIGHT] SOLVE_RELEASED " in line]
           cross_client = [line for line in lines if "[STAUBLI_CROSS_PIPELINE_CLIENT] PASS " in line]
           cross_release = [line for line in lines if "[STAUBLI_CROSS_PIPELINE] RELEASE signal=1" in line]
           pilz_before = [line for line in lines if "[STAUBLI_PILZ_TERMINATE] " in line and "before=0" in line]
           pilz_after = [line for line in lines if "[STAUBLI_PILZ_TERMINATE] " in line and "after=1" in line]
           if not all(len(items) == 1 for items in (
               cross_held, cross_context, cross_wrapper, cross_target, cross_control,
+              inflight_entered, inflight_terminated, inflight_released,
               cross_client, cross_release, pilz_before, pilz_after
           )):
               raise SystemExit(
                   "Cross-pipeline markers missing/duplicated: "
                   f"held={len(cross_held)} context={len(cross_context)} wrapper={len(cross_wrapper)} "
-                  f"target={len(cross_target)} control={len(cross_control)} client={len(cross_client)} "
-                  f"release={len(cross_release)} pilz_before={len(pilz_before)} pilz_after={len(pilz_after)}"
+                  f"inflight_entered={len(inflight_entered)} inflight_terminated={len(inflight_terminated)} "
+                  f"inflight_released={len(inflight_released)} target={len(cross_target)} "
+                  f"control={len(cross_control)} client={len(cross_client)} release={len(cross_release)} "
+                  f"pilz_before={len(pilz_before)} pilz_after={len(pilz_after)}"
               )
           if not re.search(r"active=1", cross_held[0]) or not re.search(r"active_before=1 result=1", cross_wrapper[0]):
               raise SystemExit(f"OMPL was not active at terminate: held={cross_held}, wrapper={cross_wrapper}")
@@ -1623,16 +1785,27 @@ jobs:
               raise SystemExit(
                   f"Pilz terminate pointer mismatch: target={target_ptr.group(1)} before={terminate_ptr.group(1)} after={after_ptr.group(1)}"
               )
-          if "planning_failed=1" not in cross_target[0] or "success=1" not in cross_control[0]:
-              raise SystemExit(f"Pilz target/negative-control state mismatch: target={cross_target}, control={cross_control}")
+          if not (
+              "terminated=1" in inflight_terminated[0]
+              and "solve_done=0" in inflight_terminated[0]
+              and "success=1" in inflight_released[0]
+              and "code=1" in inflight_released[0]
+              and "planning_failed=1" in cross_target[0]
+              and "success=1" in cross_control[0]
+          ):
+              raise SystemExit(
+                  "Pilz in-flight/after-terminate/negative-control state mismatch: "
+                  f"inflight={inflight_terminated}/{inflight_released}, target={cross_target}, control={cross_control}"
+              )
           if len(terminate_entries) != 1:
               raise SystemExit(f"Expected one actual PlanningPipeline::terminate entry, got {terminate_entries}")
           cross_released = [line for line in lines if "[STAUBLI_CROSS_PIPELINE] A_OMPL_RELEASED released=1" in line]
           if len(cross_released) != 1:
               raise SystemExit(f"OMPL cross-pipeline barrier did not release cleanly: {cross_released}")
           cross_order = [
-              lines.index(cross_held[0]), lines.index(cross_context[0]), lines.index(terminate_entries[0]),
-              lines.index(pilz_before[0]), lines.index(pilz_after[0]), lines.index(cross_wrapper[0]),
+              lines.index(cross_held[0]), lines.index(cross_context[0]), lines.index(inflight_entered[0]),
+              lines.index(terminate_entries[0]), lines.index(pilz_before[0]), lines.index(pilz_after[0]),
+              lines.index(cross_wrapper[0]), lines.index(inflight_terminated[0]), lines.index(inflight_released[0]),
               lines.index(cross_target[0]), lines.index(cross_control[0]), lines.index(cross_release[0]),
               lines.index(cross_released[0])
           ]
