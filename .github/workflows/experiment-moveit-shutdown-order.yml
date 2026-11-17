@@ -125,7 +125,7 @@ jobs:
                     const auto& pipeline_name = pipeline_entry.first;
                     const auto& pipeline_instance = pipeline_entry.second;
                     std::fprintf(stderr,
-                                 "[STAUBLI_PIPELINE_MAP] id=%s pipeline=%p active=%d\\n",
+                                 "[STAUBLI_PIPELINE_MAP] id=%s pipeline=%p active=%d\n",
                                  pipeline_name.c_str(), static_cast<const void*>(pipeline_instance.get()),
                                  pipeline_instance && pipeline_instance->isActive() ? 1 : 0);
                     std::fflush(stderr);
