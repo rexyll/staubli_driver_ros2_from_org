@@ -917,6 +917,8 @@ jobs:
               and "planning_scene_monitor_lifetime" in source
               and "staubli_terminate_probe_service.reset();" in source
               and "staubli_cross_pipeline_service.reset();" in source
+              and "staubli_probe_status_service.reset();" in source
+              and "staubli_test_probe_status" in source
               and "staubli_test_cross_pipeline_terminate" in source
               and "private_executor_.reset();" in tem_source
               and "controller_mgr_node_.reset();" in tem_source
