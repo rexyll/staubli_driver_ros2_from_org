@@ -120,6 +120,16 @@ jobs:
                                  const std_srvs::srv::Trigger::Response::SharedPtr& response) {
                   (void)request;
                   const auto& pipelines = moveit_cpp->getPlanningPipelines();
+                  for (const auto& pipeline_entry : pipelines)
+                  {
+                    const auto& pipeline_name = pipeline_entry.first;
+                    const auto& pipeline_instance = pipeline_entry.second;
+                    std::fprintf(stderr,
+                                 "[STAUBLI_PIPELINE_MAP] id=%s pipeline=%p active=%d\\n",
+                                 pipeline_name.c_str(), static_cast<const void*>(pipeline_instance.get()),
+                                 pipeline_instance && pipeline_instance->isActive() ? 1 : 0);
+                    std::fflush(stderr);
+                  }
                   const auto pipeline = pipelines.find("ompl");
                   const bool active_before =
                       pipeline != pipelines.end() && pipeline->second && pipeline->second->isActive();
@@ -1288,6 +1298,20 @@ jobs:
           )
           if not slow_resume or slow_resume.group(2) != "0" or slow_resume.group(3) != "1":
               raise SystemExit(f"Slow request did not resume with active=0/probe_inflight=1: {probe_markers['SLOW_RESUME']}")
+          # Runtime pipeline map is the authority for this process; do not infer IDs from config files alone.
+          pipeline_map_lines = [line for line in lines if "[STAUBLI_PIPELINE_MAP] " in line]
+          pipeline_ids = {
+              match.group(1)
+              for line in pipeline_map_lines
+              if (match := re.search(r"\\[STAUBLI_PIPELINE_MAP\\] id=([^ ]+) pipeline=(0x[0-9a-fA-F]+)", line))
+          }
+          pipeline_ptrs = {
+              match.group(2)
+              for line in pipeline_map_lines
+              if (match := re.search(r"\\[STAUBLI_PIPELINE_MAP\\] id=([^ ]+) pipeline=(0x[0-9a-fA-F]+)", line))
+          }
+          if "ompl" not in pipeline_ids or len(pipeline_ids) < 2 or len(pipeline_ptrs) < 2:
+              raise SystemExit(f"MoveItCpp did not expose at least two distinct runtime pipelines: ids={pipeline_ids}, pointers={pipeline_ptrs}")
           client_pass = [line for line in lines if "[STAUBLI_ACTIVE_PROBE_CLIENT] PASS plan=SUCCESS sequence=SUCCESS terminate=wrapper_called" in line]
           if len(client_pass) != 1:
               raise SystemExit(f"Expected one successful concurrent service-client + terminate-wrapper assertion, observed {len(client_pass)}")
