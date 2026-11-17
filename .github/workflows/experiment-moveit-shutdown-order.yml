@@ -101,19 +101,26 @@ jobs:
                   raise SystemExit("Could not locate unique MoveGroup include insertion anchor.")
               source = source.replace(
                   "#include <memory>\n",
-                  "#include <cstdlib>\n#include <memory>\n#include <std_srvs/srv/trigger.hpp>\n",
+                  "#include <cstdlib>\n#include <cstdio>\n#include <memory>\n"
+                  "#include <moveit/planning_interface/planning_interface.hpp>\n"
+                  "#include <moveit_msgs/msg/constraints.hpp>\n"
+                  "#include <moveit_msgs/msg/joint_constraint.hpp>\n"
+                  "#include <std_srvs/srv/trigger.hpp>\n",
                   1,
               )
           terminate_service_anchor = "  auto moveit_cpp = std::make_shared<moveit_cpp::MoveItCpp>(nh, moveit_cpp_options);\n"
           if source.count(terminate_service_anchor) != 1:
               raise SystemExit("Expected unique MoveItCpp main() owner for terminate-probe service.")
           terminate_service_patch = '''  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr staubli_terminate_probe_service;
+          rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr staubli_cross_pipeline_service;
           const char* staubli_terminate_probe_env = std::getenv("STAUBLI_TERMINATE_PROBE");
           if (staubli_terminate_probe_env != nullptr && staubli_terminate_probe_env[0] == '1' &&
               staubli_terminate_probe_env[1] == '\\0')
           {
             nh->declare_parameter<bool>("staubli_test_slow_held", false);
             nh->declare_parameter<bool>("staubli_test_release_slow", false);
+            nh->declare_parameter<bool>("staubli_test_cross_pipeline_held", false);
+            nh->declare_parameter<bool>("staubli_test_release_cross_pipeline", false);
             staubli_terminate_probe_service = nh->create_service<std_srvs::srv::Trigger>(
                 "/staubli_test_terminate_ompl",
                 [moveit_cpp, nh](const std_srvs::srv::Trigger::Request::SharedPtr& request,
@@ -145,6 +152,115 @@ jobs:
                                release_result.successful ? 1 : 0);
                   std::fflush(stderr);
                 });
+            staubli_cross_pipeline_service = nh->create_service<std_srvs::srv::Trigger>(
+                "/staubli_test_cross_pipeline_terminate",
+                [moveit_cpp, nh](const std_srvs::srv::Trigger::Request::SharedPtr& request,
+                                 const std_srvs::srv::Trigger::Response::SharedPtr& response) {
+                  (void)request;
+                  const auto pipelines = moveit_cpp->getPlanningPipelines();
+                  const auto ompl = pipelines.find("ompl");
+                  const auto pilz = pipelines.find("pilz_industrial_motion_planner");
+                  const bool active_before =
+                      ompl != pipelines.end() && ompl->second && ompl->second->isActive();
+                  if (!active_before || pilz == pipelines.end() || !pilz->second ||
+                      pilz->second->getPlannerPluginNames().empty())
+                  {
+                    response->success = false;
+                    response->message = "precondition failed: OMPL active and Pilz pipeline required";
+                    nh->set_parameter(rclcpp::Parameter("staubli_test_release_cross_pipeline", true));
+                    return;
+                  }
+                  const auto& planner_name = pilz->second->getPlannerPluginNames().front();
+                  const auto planner_manager = pilz->second->getPlannerManager(planner_name);
+                  const auto psm = moveit_cpp->getPlanningSceneMonitorNonConst();
+                  const auto scene = psm ? psm->getPlanningScene() : nullptr;
+                  if (!planner_manager || !scene)
+                  {
+                    response->success = false;
+                    response->message = "Pilz PlannerManager or PlanningScene unavailable";
+                    nh->set_parameter(rclcpp::Parameter("staubli_test_release_cross_pipeline", true));
+                    return;
+                  }
+                  planning_interface::MotionPlanRequest pilz_request;
+                  pilz_request.group_name = "arm";
+                  pilz_request.planner_id = "PTP";
+                  pilz_request.allowed_planning_time = 5.0;
+                  pilz_request.num_planning_attempts = 1;
+                  pilz_request.start_state.is_diff = true;
+                  pilz_request.max_velocity_scaling_factor = 0.5;
+                  pilz_request.max_acceleration_scaling_factor = 0.5;
+                  moveit_msgs::msg::Constraints goal;
+                  const double target_positions[] = { 0.11, 0.21, 0.31, 0.41, 0.51, 0.61 };
+                  for (std::size_t index = 0; index < 6; ++index)
+                  {
+                    moveit_msgs::msg::JointConstraint joint;
+                    joint.joint_name = "joint_" + std::to_string(index + 1);
+                    joint.position = target_positions[index];
+                    joint.tolerance_above = 0.05;
+                    joint.tolerance_below = 0.05;
+                    joint.weight = 1.0;
+                    goal.joint_constraints.push_back(joint);
+                  }
+                  pilz_request.goal_constraints.push_back(goal);
+                  moveit_msgs::msg::MoveItErrorCodes context_error;
+                  auto target_context =
+                      planner_manager->getPlanningContext(scene, pilz_request, context_error);
+                  if (!target_context)
+                  {
+                    response->success = false;
+                    response->message = "failed to create target Pilz PlanningContext";
+                    nh->set_parameter(rclcpp::Parameter("staubli_test_release_cross_pipeline", true));
+                    return;
+                  }
+                  std::fprintf(stderr,
+                               "[STAUBLI_CROSS_PIPELINE] B_CONTEXT_CREATED manager=%p context=%p A_active=%d\\n",
+                               static_cast<const void*>(planner_manager.get()),
+                               static_cast<const void*>(target_context.get()), active_before ? 1 : 0);
+                  std::fflush(stderr);
+                  const bool wrapper_result = moveit_cpp->terminatePlanningPipeline("ompl");
+                  std::fprintf(stderr,
+                               "[STAUBLI_CROSS_PIPELINE] A_WRAPPER_RETURN active_before=%d result=%d\\n",
+                               active_before ? 1 : 0, wrapper_result ? 1 : 0);
+                  std::fflush(stderr);
+                  planning_interface::MotionPlanResponse target_response;
+                  target_context->solve(target_response);
+                  const bool target_rejected =
+                      target_response.error_code.val == moveit_msgs::msg::MoveItErrorCodes::PLANNING_FAILED;
+                  std::fprintf(stderr,
+                               "[STAUBLI_CROSS_PIPELINE] B_TARGET_SOLVE context=%p planning_failed=%d code=%d\\n",
+                               static_cast<const void*>(target_context.get()), target_rejected ? 1 : 0,
+                               target_response.error_code.val);
+                  std::fflush(stderr);
+                  moveit_msgs::msg::MoveItErrorCodes control_error;
+                  auto control_context =
+                      planner_manager->getPlanningContext(scene, pilz_request, control_error);
+                  bool control_success = false;
+                  if (control_context)
+                  {
+                    std::fprintf(stderr, "[STAUBLI_CROSS_PIPELINE] B_CONTROL_CREATED context=%p\\n",
+                                 static_cast<const void*>(control_context.get()));
+                    std::fflush(stderr);
+                    planning_interface::MotionPlanResponse control_response;
+                    control_context->solve(control_response);
+                    control_success =
+                        control_response.error_code.val == moveit_msgs::msg::MoveItErrorCodes::SUCCESS;
+                    std::fprintf(stderr, "[STAUBLI_CROSS_PIPELINE] B_CONTROL_SOLVE context=%p success=%d code=%d\\n",
+                                 static_cast<const void*>(control_context.get()), control_success ? 1 : 0,
+                                 control_response.error_code.val);
+                    std::fflush(stderr);
+                  }
+                  response->success = active_before && wrapper_result && target_rejected && control_success;
+                  response->message =
+                      "active=" + std::to_string(active_before) +
+                      " wrapper=" + std::to_string(wrapper_result) +
+                      " target_rejected=" + std::to_string(target_rejected) +
+                      " control_success=" + std::to_string(control_success);
+                  const auto release_result =
+                      nh->set_parameter(rclcpp::Parameter("staubli_test_release_cross_pipeline", true));
+                  std::fprintf(stderr, "[STAUBLI_CROSS_PIPELINE] RELEASE signal=%d\\n",
+                               release_result.successful ? 1 : 0);
+                  std::fflush(stderr);
+                });
           }
           '''
           source = source.replace(
@@ -152,7 +268,12 @@ jobs:
               terminate_service_anchor + terminate_service_patch,
               1,
           )
-          if not ("staubli_test_terminate_ompl" in source and "terminatePlanningPipeline" in source):
+          if not (
+              "staubli_test_terminate_ompl" in source
+              and "staubli_test_cross_pipeline_terminate" in source
+              and "staubli_cross_pipeline_service.reset();" in source
+              and "terminatePlanningPipeline" in source
+          ):
               raise SystemExit("MoveItCpp terminate-probe service static validation failed.") 
           # Keep the PSM strongly owned through MoveGroupExe/executor destruction,
           # then explicitly reset it after recording the weak-only use count.
@@ -165,6 +286,7 @@ jobs:
               "    rclcpp::shutdown();",
               """    rclcpp::shutdown();
                   staubli_terminate_probe_service.reset();
+                  staubli_cross_pipeline_service.reset();
                   moveit_cpp.reset();
                   nh.reset();""",
               1,
@@ -537,6 +659,11 @@ jobs:
             const bool staubli_terminate_probe_enabled =
                 staubli_terminate_probe_env != nullptr && staubli_terminate_probe_env[0] == '1' &&
                 staubli_terminate_probe_env[1] == '\\0';
+            const char* staubli_cross_pipeline_env = std::getenv("STAUBLI_CROSS_PIPELINE_PROBE");
+            const bool staubli_probe_cross =
+                staubli_terminate_probe_enabled && staubli_cross_pipeline_env != nullptr &&
+                staubli_cross_pipeline_env[0] == '1' && staubli_cross_pipeline_env[1] == '\\0' &&
+                std::fabs(req.allowed_planning_time - 7.733) < 1e-9;
 
             static std::mutex staubli_probe_mutex;
             static std::condition_variable staubli_probe_cv;
@@ -568,6 +695,30 @@ jobs:
               }
             };
             StaubliProbeFlightGuard staubli_probe_guard(staubli_probe_inflight);
+
+            if (staubli_probe_cross)
+            {
+              node_->set_parameter(rclcpp::Parameter("staubli_test_cross_pipeline_held", true));
+              std::fprintf(stderr, "[STAUBLI_CROSS_PIPELINE] A_OMPL_HELD pipeline=%p active=%d\\n",
+                           static_cast<const void*>(this), active_.load() ? 1 : 0);
+              std::fflush(stderr);
+              bool release_cross_pipeline = false;
+              const auto cross_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+              while (std::chrono::steady_clock::now() < cross_deadline && !release_cross_pipeline)
+              {
+                node_->get_parameter("staubli_test_release_cross_pipeline", release_cross_pipeline);
+                if (!release_cross_pipeline)
+                  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+              }
+              std::fprintf(stderr, "[STAUBLI_CROSS_PIPELINE] A_OMPL_RELEASED released=%d active=%d\\n",
+                           release_cross_pipeline ? 1 : 0, active_.load() ? 1 : 0);
+              std::fflush(stderr);
+              if (!release_cross_pipeline)
+              {
+                active_ = false;
+                return false;
+              }
+            }
 
             if (staubli_probe_fast || staubli_probe_slow)
             {
@@ -683,9 +834,44 @@ jobs:
               and "staubli_probe_guard.leave();" in pipeline_source
               and "staubli_probe_inflight.load()" in pipeline_source
               and "std::chrono::seconds(20)" in pipeline_source
+              and "staubli_probe_cross" in pipeline_source
+              and "staubli_test_cross_pipeline_held" in pipeline_source
+              and "A_OMPL_HELD" in pipeline_source
           ):
               raise SystemExit("PlanningPipeline active-probe final validation failed.")
           print("Applied environment-gated, timeout-protected PlanningPipeline overlap probe to temporary MoveIt overlay.")
+
+          pilz_context_path = Path(
+              "/tmp/moveit_ws/src/moveit2/moveit_planners/pilz_industrial_motion_planner/include/pilz_industrial_motion_planner/planning_context_base.hpp"
+          )
+          pilz_context_source = pilz_context_path.read_text()
+          if "#include <cstdio>" not in pilz_context_source:
+              pilz_context_source = pilz_context_source.replace(
+                  "#include <atomic>\n", "#include <atomic>\n#include <cstdio>\n", 1
+              )
+          old_pilz_terminate = """bool pilz_industrial_motion_planner::PlanningContextBase<GeneratorT>::terminate()
+          {
+            RCLCPP_DEBUG_STREAM(rclcpp::get_logger("moveit.pilz_industrial_motion_planner.planning_context_base"),
+                                "Terminate called");
+            terminated_ = true;
+            return true;
+          }"""
+          new_pilz_terminate = """bool pilz_industrial_motion_planner::PlanningContextBase<GeneratorT>::terminate()
+          {
+            const bool before = terminated_.load();
+            std::fprintf(stderr, "[STAUBLI_PILZ_TERMINATE] this=%p before=%d\\n",
+                         static_cast<const void*>(this), before ? 1 : 0);
+            std::fflush(stderr);
+            terminated_.store(true);
+            std::fprintf(stderr, "[STAUBLI_PILZ_TERMINATE] this=%p after=%d\\n",
+                         static_cast<const void*>(this), terminated_.load() ? 1 : 0);
+            std::fflush(stderr);
+            return true;
+          }"""
+          if pilz_context_source.count(old_pilz_terminate) != 1:
+              raise SystemExit("Expected exactly one Pilz PlanningContextBase::terminate() implementation.")
+          pilz_context_source = pilz_context_source.replace(old_pilz_terminate, new_pilz_terminate, 1)
+          pilz_context_path.write_text(pilz_context_source)
 
           if not (
               "[PSM-DTOR] BEGIN" in psm_source
@@ -709,6 +895,8 @@ jobs:
               and "nh.reset();" in source
               and "planning_scene_monitor_lifetime" in source
               and "staubli_terminate_probe_service.reset();" in source
+              and "staubli_cross_pipeline_service.reset();" in source
+              and "staubli_test_cross_pipeline_terminate" in source
               and "private_executor_.reset();" in tem_source
               and "controller_mgr_node_.reset();" in tem_source
               and "controller_manager_loader_.reset();" in tem_source
@@ -787,10 +975,12 @@ jobs:
           shutdown_anchor = "\n\n@launch_testing.post_shutdown_test()\n"
           method_name = "test_z_move_group_executes_joint_goal_on_mock_controller"
           concurrency_method_name = "test_y_same_ompl_pipeline_plan_and_sequence_overlap"
+          cross_pipeline_method_name = "test_x_active_ompl_terminate_marks_live_pilz_context"
           if (
               source.count(shutdown_anchor) != 1
               or method_name in source
               or concurrency_method_name in source
+              or cross_pipeline_method_name in source
           ):
               raise SystemExit("Unexpected launch-test structure; refusing duplicate test injection.")
 
@@ -913,6 +1103,69 @@ jobs:
                   print("[STAUBLI_ACTIVE_PROBE_CLIENT] PASS plan=SUCCESS sequence=SUCCESS terminate=wrapper_called")
           '''
 
+          cross_pipeline_method = '''
+              def test_x_active_ompl_terminate_marks_live_pilz_context(self):
+                  """Verify active OMPL terminate reaches a separately-owned live Pilz context."""
+                  plan_client = self.node.create_client(GetMotionPlan, "/plan_kinematic_path")
+                  parameter_client = self.node.create_client(GetParameters, "/move_group/get_parameters")
+                  terminate_client = self.node.create_client(Trigger, "/staubli_test_cross_pipeline_terminate")
+                  self.assertTrue(plan_client.wait_for_service(timeout_sec=120.0))
+                  self.assertTrue(parameter_client.wait_for_service(timeout_sec=120.0))
+                  self.assertTrue(terminate_client.wait_for_service(timeout_sec=120.0))
+                  request = GetMotionPlan.Request()
+                  request.motion_plan_request.group_name = "arm"
+                  request.motion_plan_request.pipeline_id = "ompl"
+                  request.motion_plan_request.allowed_planning_time = 7.733
+                  request.motion_plan_request.num_planning_attempts = 2
+                  request.motion_plan_request.start_state.is_diff = True
+                  request.motion_plan_request.max_velocity_scaling_factor = 0.5
+                  request.motion_plan_request.max_acceleration_scaling_factor = 0.5
+                  constraints = Constraints()
+                  target_positions = (0.11, 0.21, 0.31, 0.41, 0.51, 0.61)
+                  for index, position in enumerate(target_positions, start=1):
+                      joint = JointConstraint()
+                      joint.joint_name = f"joint_{index}"
+                      joint.position = position
+                      joint.tolerance_above = 0.05
+                      joint.tolerance_below = 0.05
+                      joint.weight = 1.0
+                      constraints.joint_constraints.append(joint)
+                  request.motion_plan_request.goal_constraints.append(constraints)
+                  plan_future = plan_client.call_async(request)
+                  held = False
+                  for _ in range(300):
+                      parameter_request = GetParameters.Request()
+                      parameter_request.names = ["staubli_test_cross_pipeline_held"]
+                      parameter_future = parameter_client.call_async(parameter_request)
+                      rclpy.spin_until_future_complete(self.node, parameter_future, timeout_sec=1.0)
+                      self.assertTrue(parameter_future.done(), "Cross-pipeline held-state query timed out")
+                      values = parameter_future.result().values
+                      self.assertEqual(len(values), 1)
+                      if values[0].bool_value:
+                          held = True
+                          break
+                      time.sleep(0.05)
+                  self.assertTrue(held, "OMPL request never entered the active cross-pipeline barrier")
+                  terminate_future = terminate_client.call_async(Trigger.Request())
+                  rclpy.spin_until_future_complete(self.node, terminate_future, timeout_sec=30.0)
+                  self.assertTrue(terminate_future.done(), "Cross-pipeline terminate service timed out")
+                  terminate_response = terminate_future.result()
+                  self.assertIsNotNone(terminate_response)
+                  self.assertTrue(
+                      terminate_response.success,
+                      f"Cross-pipeline context assertions failed: {terminate_response.message}",
+                  )
+                  self.assertIn("active=1", terminate_response.message)
+                  self.assertIn("target_rejected=1", terminate_response.message)
+                  self.assertIn("control_success=1", terminate_response.message)
+                  rclpy.spin_until_future_complete(self.node, plan_future, timeout_sec=120.0)
+                  self.assertTrue(plan_future.done(), "Held OMPL request did not resume after cross-pipeline probe")
+                  plan_response = plan_future.result()
+                  self.assertEqual(plan_response.motion_plan_response.error_code.val, MoveItErrorCodes.SUCCESS)
+                  self.assertTrue(plan_response.motion_plan_response.trajectory.joint_trajectory.points)
+                  print("[STAUBLI_CROSS_PIPELINE_CLIENT] PASS active_ompl=1 pilz_target=PLANNING_FAILED control=SUCCESS")
+          '''
+
           method = '''
               def test_z_move_group_executes_joint_goal_on_mock_controller(self):
                   """Run a real MoveGroup plan-and-execute request on mock hardware."""
@@ -967,11 +1220,11 @@ jobs:
 
           source = source.replace(
               shutdown_anchor,
-              "\n\n" + concurrency_method + "\n" + method + shutdown_anchor,
+              "\n\n" + cross_pipeline_method + "\n" + concurrency_method + "\n" + method + shutdown_anchor,
               1,
           )
           test_path.write_text(source)
-          print("Added deterministic same-pipeline PlanService/SequenceService overlap coverage plus mock execution coverage.")
+          print("Added active OMPL -> live Pilz cross-pipeline probe, same-pipeline overlap coverage, and mock execution coverage.")
           PY
           rosdep install --from-paths /tmp/staubli_ws/src --ignore-src --rosdistro jazzy -y
           cd /tmp/staubli_ws
@@ -988,6 +1241,7 @@ jobs:
           unset LD_PRELOAD ASAN_OPTIONS
           export STAUBLI_ACTIVE_PROBE=1
           export STAUBLI_TERMINATE_PROBE=1
+          export STAUBLI_CROSS_PIPELINE_PROBE=1
           # Capture DSO unload events, then inspect each CallbackGroup weak ServiceBase
           # control block at the reproducible pnode_ teardown SIGSEGV.
           # This is diagnostic-only; it does not change MoveIt/rclcpp/driver source.
@@ -1257,14 +1511,14 @@ jobs:
           launch_tests = sum("Ran 1 test in" in line for line in lines)
           if launch_tests != 1:
               raise SystemExit(f"Expected one launch test execution, observed {launch_tests}")
-          concurrent_suites = sum("Ran 3 tests in" in line for line in lines)
+          concurrent_suites = sum("Ran 4 tests in" in line for line in lines)
           if concurrent_suites != 1:
-              raise SystemExit(f"Expected the three-test pre-shutdown launch suite, observed {concurrent_suites}")
+              raise SystemExit(f"Expected the four-test pre-shutdown launch suite, observed {concurrent_suites}")
           # colcon test-result writes the aggregate summary to result_log, not output_log.
           # The new same-pipeline unittest adds one xUnit test case to the
           # existing seven-test package summary. Fail closed if the count drifts.
           passing_summaries = sum(
-              "Summary: 8 tests, 0 errors, 0 failures, 0 skipped" in line
+              "Summary: 9 tests, 0 errors, 0 failures, 0 skipped" in line
               for line in result_lines
           )
           if passing_summaries != 1:
@@ -1322,8 +1576,51 @@ jobs:
           if len(wrapper_calls) != 1 or not re.search(r"active_before=0 result=1", wrapper_calls[0]):
               raise SystemExit(f"Expected MoveItCpp wrapper to return with active_before=0: {wrapper_calls}")
           terminate_entries = [line for line in lines if "[STAUBLI_TERMINATE_PROBE] PIPELINE_TERMINATE_ENTER " in line]
-          if terminate_entries:
-              raise SystemExit(f"PlanningPipeline::terminate unexpectedly entered despite active_before=0: {terminate_entries}")
+          cross_held = [line for line in lines if "[STAUBLI_CROSS_PIPELINE] A_OMPL_HELD " in line]
+          cross_context = [line for line in lines if "[STAUBLI_CROSS_PIPELINE] B_CONTEXT_CREATED " in line]
+          cross_wrapper = [line for line in lines if "[STAUBLI_CROSS_PIPELINE] A_WRAPPER_RETURN " in line]
+          cross_target = [line for line in lines if "[STAUBLI_CROSS_PIPELINE] B_TARGET_SOLVE " in line]
+          cross_control = [line for line in lines if "[STAUBLI_CROSS_PIPELINE] B_CONTROL_SOLVE " in line]
+          cross_client = [line for line in lines if "[STAUBLI_CROSS_PIPELINE_CLIENT] PASS " in line]
+          cross_release = [line for line in lines if "[STAUBLI_CROSS_PIPELINE] RELEASE signal=1" in line]
+          pilz_before = [line for line in lines if "[STAUBLI_PILZ_TERMINATE] " in line and "before=0" in line]
+          pilz_after = [line for line in lines if "[STAUBLI_PILZ_TERMINATE] " in line and "after=1" in line]
+          if not all(len(items) == 1 for items in (
+              cross_held, cross_context, cross_wrapper, cross_target, cross_control,
+              cross_client, cross_release, pilz_before, pilz_after
+          )):
+              raise SystemExit(
+                  "Cross-pipeline markers missing/duplicated: "
+                  f"held={len(cross_held)} context={len(cross_context)} wrapper={len(cross_wrapper)} "
+                  f"target={len(cross_target)} control={len(cross_control)} client={len(cross_client)} "
+                  f"release={len(cross_release)} pilz_before={len(pilz_before)} pilz_after={len(pilz_after)}"
+              )
+          if not re.search(r"active=1", cross_held[0]) or not re.search(r"active_before=1 result=1", cross_wrapper[0]):
+              raise SystemExit(f"OMPL was not active at terminate: held={cross_held}, wrapper={cross_wrapper}")
+          target_ptr = re.search(r"context=(0x[0-9a-fA-F]+)", cross_context[0])
+          terminate_ptr = re.search(r"this=(0x[0-9a-fA-F]+)", pilz_before[0])
+          after_ptr = re.search(r"this=(0x[0-9a-fA-F]+)", pilz_after[0])
+          if not target_ptr or not terminate_ptr or not after_ptr:
+              raise SystemExit("Could not parse Pilz context/terminate object pointers.")
+          if target_ptr.group(1) != terminate_ptr.group(1) or target_ptr.group(1) != after_ptr.group(1):
+              raise SystemExit(
+                  f"Pilz terminate pointer mismatch: target={target_ptr.group(1)} before={terminate_ptr.group(1)} after={after_ptr.group(1)}"
+              )
+          if "planning_failed=1" not in cross_target[0] or "success=1" not in cross_control[0]:
+              raise SystemExit(f"Pilz target/negative-control state mismatch: target={cross_target}, control={cross_control}")
+          if len(terminate_entries) != 1:
+              raise SystemExit(f"Expected one actual PlanningPipeline::terminate entry, got {terminate_entries}")
+          cross_released = [line for line in lines if "[STAUBLI_CROSS_PIPELINE] A_OMPL_RELEASED released=1" in line]
+          if len(cross_released) != 1:
+              raise SystemExit(f"OMPL cross-pipeline barrier did not release cleanly: {cross_released}")
+          cross_order = [
+              lines.index(cross_held[0]), lines.index(cross_context[0]), lines.index(terminate_entries[0]),
+              lines.index(pilz_before[0]), lines.index(pilz_after[0]), lines.index(cross_wrapper[0]),
+              lines.index(cross_target[0]), lines.index(cross_control[0]), lines.index(cross_release[0]),
+              lines.index(cross_released[0])
+          ]
+          if cross_order != sorted(cross_order):
+              raise SystemExit(f"Cross-pipeline event ordering invalid: {cross_order}")
           slow_releases = [line for line in lines if "[STAUBLI_TERMINATE_PROBE] SLOW_RELEASED released=1" in line]
           service_releases = [line for line in lines if "[STAUBLI_TERMINATE_PROBE] RELEASE slow=1" in line]
           if len(slow_releases) != 1 or len(service_releases) != 1:
