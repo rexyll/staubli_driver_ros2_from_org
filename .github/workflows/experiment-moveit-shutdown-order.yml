@@ -1145,7 +1145,7 @@ jobs:
           if not (
               "RequestGuard request_guard{ this, request_token };" in pipeline_source
               and "request_token->attachContext(context);" in pipeline_source
-              and "request_token->requestCancel();" in pipeline_source
+              and "request->requestCancel();" in pipeline_source
               and "active_requests_.empty()" in pipeline_source
               and "planner_pair.second->terminate()" not in pipeline_source
               and "request_token->isCancelled()" in pipeline_source
