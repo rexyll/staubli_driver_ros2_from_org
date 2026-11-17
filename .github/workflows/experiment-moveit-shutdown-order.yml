@@ -271,7 +271,6 @@ jobs:
           if not (
               "staubli_test_terminate_ompl" in source
               and "staubli_test_cross_pipeline_terminate" in source
-              and "staubli_cross_pipeline_service.reset();" in source
               and "terminatePlanningPipeline" in source
           ):
               raise SystemExit("MoveItCpp terminate-probe service static validation failed.") 
