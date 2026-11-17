@@ -113,6 +113,8 @@ jobs:
               raise SystemExit("Expected unique MoveItCpp main() owner for terminate-probe service.")
           terminate_service_patch = '''  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr staubli_terminate_probe_service;
           rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr staubli_cross_pipeline_service;
+          rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr staubli_probe_status_service;
+          rclcpp::CallbackGroup::SharedPtr staubli_probe_callback_group;
           const char* staubli_terminate_probe_env = std::getenv("STAUBLI_TERMINATE_PROBE");
           if (staubli_terminate_probe_env != nullptr && staubli_terminate_probe_env[0] == '1' &&
               staubli_terminate_probe_env[1] == '\\0')
@@ -121,6 +123,22 @@ jobs:
             nh->declare_parameter<bool>("staubli_test_release_slow", false);
             nh->declare_parameter<bool>("staubli_test_cross_pipeline_held", false);
             nh->declare_parameter<bool>("staubli_test_release_cross_pipeline", false);
+            staubli_probe_callback_group =
+                nh->create_callback_group(rclcpp::CallbackGroupType::Reentrant);
+            staubli_probe_status_service = nh->create_service<std_srvs::srv::Trigger>(
+                "/staubli_test_probe_status",
+                [nh](const std_srvs::srv::Trigger::Request::SharedPtr& request,
+                     const std_srvs::srv::Trigger::Response::SharedPtr& response) {
+                  (void)request;
+                  bool slow_held = false;
+                  bool cross_held = false;
+                  nh->get_parameter("staubli_test_slow_held", slow_held);
+                  nh->get_parameter("staubli_test_cross_pipeline_held", cross_held);
+                  response->success = slow_held || cross_held;
+                  response->message = "slow_held=" + std::to_string(slow_held) +
+                                      " cross_held=" + std::to_string(cross_held);
+                },
+                rmw_qos_profile_services_default, staubli_probe_callback_group);
             staubli_terminate_probe_service = nh->create_service<std_srvs::srv::Trigger>(
                 "/staubli_test_terminate_ompl",
                 [moveit_cpp, nh](const std_srvs::srv::Trigger::Request::SharedPtr& request,
@@ -151,7 +169,7 @@ jobs:
                   std::fprintf(stderr, "[STAUBLI_TERMINATE_PROBE] RELEASE slow=%d\\n",
                                release_result.successful ? 1 : 0);
                   std::fflush(stderr);
-                });
+                }, rmw_qos_profile_services_default, staubli_probe_callback_group);
             staubli_cross_pipeline_service = nh->create_service<std_srvs::srv::Trigger>(
                 "/staubli_test_cross_pipeline_terminate",
                 [moveit_cpp, nh](const std_srvs::srv::Trigger::Request::SharedPtr& request,
@@ -260,7 +278,7 @@ jobs:
                   std::fprintf(stderr, "[STAUBLI_CROSS_PIPELINE] RELEASE signal=%d\\n",
                                release_result.successful ? 1 : 0);
                   std::fflush(stderr);
-                });
+                }, rmw_qos_profile_services_default, staubli_probe_callback_group);
           }
           '''
           source = source.replace(
@@ -271,6 +289,9 @@ jobs:
           if not (
               "staubli_test_terminate_ompl" in source
               and "staubli_test_cross_pipeline_terminate" in source
+              and "staubli_test_probe_status" in source
+              and "CallbackGroupType::Reentrant" in source
+              and "staubli_probe_status_service" in source
               and "terminatePlanningPipeline" in source
           ):
               raise SystemExit("MoveItCpp terminate-probe service static validation failed.") 
@@ -286,6 +307,7 @@ jobs:
               """    rclcpp::shutdown();
                   staubli_terminate_probe_service.reset();
                   staubli_cross_pipeline_service.reset();
+                  staubli_probe_status_service.reset();
                   moveit_cpp.reset();
                   nh.reset();""",
               1,
@@ -1051,16 +1073,14 @@ jobs:
                   self.assertTrue(plan_future.done(), "PlanService concurrent request timed out")
 
                   # The server parks the slow request after the fast request has cleared active_.
+                  status_client = self.node.create_client(Trigger, "/staubli_test_probe_status")
+                  self.assertTrue(status_client.wait_for_service(timeout_sec=120.0))
                   slow_held = False
                   for _ in range(200):
-                      parameter_request = GetParameters.Request()
-                      parameter_request.names = ["staubli_test_slow_held"]
-                      parameter_future = parameter_client.call_async(parameter_request)
-                      rclpy.spin_until_future_complete(self.node, parameter_future, timeout_sec=1.0)
-                      self.assertTrue(parameter_future.done(), "MoveGroup get_parameters request timed out")
-                      parameter_response = parameter_future.result()
-                      self.assertEqual(len(parameter_response.values), 1)
-                      if parameter_response.values[0].bool_value:
+                      status_future = status_client.call_async(Trigger.Request())
+                      rclpy.spin_until_future_complete(self.node, status_future, timeout_sec=2.0)
+                      self.assertTrue(status_future.done(), "Dedicated probe-status service timed out")
+                      if "slow_held=1" in status_future.result().message:
                           slow_held = True
                           break
                       time.sleep(0.05)
@@ -1106,10 +1126,10 @@ jobs:
               def test_x_active_ompl_terminate_marks_live_pilz_context(self):
                   """Verify active OMPL terminate reaches a separately-owned live Pilz context."""
                   plan_client = self.node.create_client(GetMotionPlan, "/plan_kinematic_path")
-                  parameter_client = self.node.create_client(GetParameters, "/move_group/get_parameters")
+                  status_client = self.node.create_client(Trigger, "/staubli_test_probe_status")
                   terminate_client = self.node.create_client(Trigger, "/staubli_test_cross_pipeline_terminate")
                   self.assertTrue(plan_client.wait_for_service(timeout_sec=120.0))
-                  self.assertTrue(parameter_client.wait_for_service(timeout_sec=120.0))
+                  self.assertTrue(status_client.wait_for_service(timeout_sec=120.0))
                   self.assertTrue(terminate_client.wait_for_service(timeout_sec=120.0))
                   request = GetMotionPlan.Request()
                   request.motion_plan_request.group_name = "arm"
@@ -1133,14 +1153,10 @@ jobs:
                   plan_future = plan_client.call_async(request)
                   held = False
                   for _ in range(300):
-                      parameter_request = GetParameters.Request()
-                      parameter_request.names = ["staubli_test_cross_pipeline_held"]
-                      parameter_future = parameter_client.call_async(parameter_request)
-                      rclpy.spin_until_future_complete(self.node, parameter_future, timeout_sec=1.0)
-                      self.assertTrue(parameter_future.done(), "Cross-pipeline held-state query timed out")
-                      values = parameter_future.result().values
-                      self.assertEqual(len(values), 1)
-                      if values[0].bool_value:
+                      status_future = status_client.call_async(Trigger.Request())
+                      rclpy.spin_until_future_complete(self.node, status_future, timeout_sec=2.0)
+                      self.assertTrue(status_future.done(), "Dedicated cross-pipeline status service timed out")
+                      if "cross_held=1" in status_future.result().message:
                           held = True
                           break
                       time.sleep(0.05)
