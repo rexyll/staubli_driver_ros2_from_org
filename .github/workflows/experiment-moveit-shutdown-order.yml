@@ -969,6 +969,10 @@ jobs:
               "    // Call plan request adapter chain\n",
               """    if (request_token->isCancelled())
             {
+              std::fprintf(stderr,
+                           "[STAUBLI_REQUEST_TOKEN] CANCEL_OBSERVED pipeline=%p token=%p stage=before_request_adapters\\n",
+                           static_cast<const void*>(this), static_cast<const void*>(request_token.get()));
+              std::fflush(stderr);
               res.error_code = moveit::core::MoveItErrorCode::PLANNING_FAILED;
               return false;
             }
@@ -1065,7 +1069,13 @@ jobs:
             for (const auto& request : requests)
             {
               if (request)
+              {
                 request->requestCancel();
+                std::fprintf(stderr,
+                             "[STAUBLI_REQUEST_TOKEN] CANCEL_REQUESTED pipeline=%p token=%p\\n",
+                             static_cast<const void*>(this), static_cast<const void*>(request.get()));
+                std::fflush(stderr);
+              }
             }
           }
           }  // namespace planning_pipeline"""
@@ -1495,7 +1505,7 @@ jobs:
                   )
                   self.assertEqual(
                       sequence_response.response.error_code.val,
-                      MoveItErrorCodes.PLANNING_FAILED,
+                      MoveItErrorCodes.FAILURE,
                   )
                   self.assertFalse(
                       sequence_response.response.planned_trajectories,
@@ -1562,7 +1572,7 @@ jobs:
                   rclpy.spin_until_future_complete(self.node, plan_future, timeout_sec=120.0)
                   self.assertTrue(plan_future.done(), "Held OMPL request did not resume after cross-pipeline probe")
                   plan_response = plan_future.result()
-                  self.assertEqual(plan_response.motion_plan_response.error_code.val, MoveItErrorCodes.PLANNING_FAILED)
+                  self.assertEqual(plan_response.motion_plan_response.error_code.val, MoveItErrorCodes.FAILURE)
                   print("[STAUBLI_CROSS_PIPELINE_CLIENT] PASS active_ompl=1 pilz_request_active=1 pilz_inflight=SUCCESS target_unterminated=1 control=SUCCESS")
           '''
 
@@ -1922,7 +1932,14 @@ jobs:
               for line in result_lines
           )
           if passing_summaries != 1:
-              raise SystemExit(f"Expected one clean 8-test summary, observed {passing_summaries}")
+              raise SystemExit(f"Expected one clean 9-test summary, observed {passing_summaries}")
+          cancel_requested = [line for line in lines if "[STAUBLI_REQUEST_TOKEN] CANCEL_REQUESTED " in line]
+          cancel_observed = [line for line in lines if "[STAUBLI_REQUEST_TOKEN] CANCEL_OBSERVED " in line]
+          if len(cancel_requested) < 20 or len(cancel_observed) < 20:
+              raise SystemExit(
+                  f"Expected >=20 request-token cancel request/observation markers across 10 repetitions; "
+                  f"requested={len(cancel_requested)} observed={len(cancel_observed)}"
+              )
           probe_names = ("SLOW_ENTER", "FAST_ENTER", "BARRIER_OPEN", "FAST_EXIT", "SLOW_RESUME")
           probe_markers = {}
           for name in probe_names:
