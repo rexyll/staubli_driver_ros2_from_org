@@ -1935,9 +1935,9 @@ jobs:
               raise SystemExit(f"Expected one clean 9-test summary, observed {passing_summaries}")
           cancel_requested = [line for line in lines if "[STAUBLI_REQUEST_TOKEN] CANCEL_REQUESTED " in line]
           cancel_observed = [line for line in lines if "[STAUBLI_REQUEST_TOKEN] CANCEL_OBSERVED " in line]
-          if len(cancel_requested) < 20 or len(cancel_observed) < 20:
+          if len(cancel_requested) < 2 or len(cancel_observed) < 2:
               raise SystemExit(
-                  f"Expected >=20 request-token cancel request/observation markers across 10 repetitions; "
+                  f"Expected >=2 request-token cancel request/observation markers in this repetition; "
                   f"requested={len(cancel_requested)} observed={len(cancel_observed)}"
               )
           probe_names = ("SLOW_ENTER", "FAST_ENTER", "BARRIER_OPEN", "FAST_EXIT", "SLOW_RESUME")
