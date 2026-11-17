@@ -680,9 +680,9 @@ jobs:
                   1
               )
           old_active_accessor = """  [[nodiscard]] bool isActive() const
-            {
-              return active_;
-            }"""
+          {
+            return active_;
+          }"""
           if pipeline_header.count(old_active_accessor) != 1:
               raise SystemExit("Expected one PlanningPipeline isActive accessor.")
           pipeline_header = pipeline_header.replace(
@@ -784,7 +784,11 @@ jobs:
           active_anchor = "  // Set planning pipeline active\n  active_ = true;"
           if pipeline_source.count(active_anchor) != 1:
               raise SystemExit("Expected one PlanningPipeline active=true anchor.")
-          probe_code = """  // CI-only deterministic probe. Disabled unless explicitly enabled by the test job.
+          probe_code = """  auto request_token = std::make_shared<RequestToken>();
+            registerActiveRequest(request_token);
+            RequestGuard request_guard{ this, request_token };
+
+            // CI-only deterministic probe. Disabled unless explicitly enabled by the test job.
             const char* staubli_probe_env = std::getenv("STAUBLI_ACTIVE_PROBE");
             const bool staubli_probe_enabled =
                 staubli_probe_env != nullptr && staubli_probe_env[0] == '1' && staubli_probe_env[1] == '\\0';
@@ -963,16 +967,7 @@ jobs:
             }
           """
           pipeline_source = pipeline_source.replace(terminate_anchor, terminate_entry_probe, 1)
-          # Replace the process-global PlannerManager terminate fan-out with request-token cancellation.
-          pipeline_source = pipeline_source.replace(
-              "  // Set planning pipeline active\n  active_ = true;",
-              """  auto request_token = std::make_shared<RequestToken>();
-            registerActiveRequest(request_token);
-            RequestGuard request_guard{ this, request_token };""",
-              1
-          )
-          if "RequestGuard request_guard{ this, request_token };" not in pipeline_source:
-              raise SystemExit("PlanningPipeline request-token registration patch failed.")
+          # Apply cancellation checks to the registered request token.
           pipeline_source = pipeline_source.replace(
               "    // Call plan request adapter chain\n",
               """    if (request_token->isCancelled())
@@ -1147,7 +1142,16 @@ jobs:
               and "A_OMPL_HELD" in pipeline_source
           ):
               raise SystemExit("PlanningPipeline active-probe final validation failed.")
-          print("Applied environment-gated, timeout-protected PlanningPipeline overlap probe to temporary MoveIt overlay.")
+          if not (
+              "RequestGuard request_guard{ this, request_token };" in pipeline_source
+              and "request_token->attachContext(context);" in pipeline_source
+              and "request_token->requestCancel();" in pipeline_source
+              and "active_requests_.empty()" in pipeline_source
+              and "planner_pair.second->terminate()" not in pipeline_source
+              and "request_token->isCancelled()" in pipeline_source
+          ):
+              raise SystemExit("Pipeline-owned request cancellation overlay validation failed.")
+          print("Applied pipeline-owned request cancellation tokens and environment-gated concurrency probes to temporary MoveIt overlay.")
 
           planning_interface_path = Path(
               "/tmp/moveit_ws/src/moveit2/moveit_core/planning_interface/include/moveit/planning_interface/planning_interface.hpp"
@@ -1498,11 +1502,7 @@ jobs:
                   )
                   self.assertFalse(
                       sequence_response.response.planned_trajectories,
-                      "SequenceService returned no planned trajectories",
-                  )
-                  self.assertTrue(
-                      sequence_response.response.planned_trajectories[0].joint_trajectory.points,
-                      "SequenceService returned an empty trajectory",
+                      "Cancelled SequenceService unexpectedly returned planned trajectories",
                   )
                   print("[STAUBLI_ACTIVE_PROBE_CLIENT] PASS plan=SUCCESS sequence=PLANNING_FAILED terminate=wrapper_called")
           '''
