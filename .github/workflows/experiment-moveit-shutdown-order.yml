@@ -1511,7 +1511,7 @@ jobs:
                       sequence_response.response.planned_trajectories,
                       "Cancelled SequenceService unexpectedly returned planned trajectories",
                   )
-                  print("[STAUBLI_ACTIVE_PROBE_CLIENT] PASS plan=SUCCESS sequence=PLANNING_FAILED terminate=wrapper_called")
+                  print("[STAUBLI_ACTIVE_PROBE_CLIENT] PASS plan=SUCCESS sequence=FAILURE terminate=wrapper_called")
           '''
 
           cross_pipeline_method = '''
@@ -1983,7 +1983,7 @@ jobs:
           }
           if "ompl" not in pipeline_ids or len(pipeline_ids) < 2 or len(pipeline_ptrs) < 2:
               raise SystemExit(f"MoveItCpp did not expose at least two distinct runtime pipelines: ids={pipeline_ids}, pointers={pipeline_ptrs}")
-          client_pass = [line for line in lines if "[STAUBLI_ACTIVE_PROBE_CLIENT] PASS plan=SUCCESS sequence=SUCCESS terminate=wrapper_called" in line]
+          client_pass = [line for line in lines if "[STAUBLI_ACTIVE_PROBE_CLIENT] PASS plan=SUCCESS sequence=FAILURE terminate=wrapper_called" in line]
           if len(client_pass) != 1:
               raise SystemExit(f"Expected one successful concurrent service-client + terminate-wrapper assertion, observed {len(client_pass)}")
           slow_held = [line for line in lines if "[STAUBLI_TERMINATE_PROBE] SLOW_HELD " in line]
