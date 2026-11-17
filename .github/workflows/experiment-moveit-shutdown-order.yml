@@ -1303,12 +1303,12 @@ jobs:
           pipeline_ids = {
               match.group(1)
               for line in pipeline_map_lines
-              if (match := re.search(r"\\[STAUBLI_PIPELINE_MAP\\] id=([^ ]+) pipeline=(0x[0-9a-fA-F]+)", line))
+              if (match := re.search(r"\[STAUBLI_PIPELINE_MAP\] id=([^ ]+) pipeline=(0x[0-9a-fA-F]+)", line))
           }
           pipeline_ptrs = {
               match.group(2)
               for line in pipeline_map_lines
-              if (match := re.search(r"\\[STAUBLI_PIPELINE_MAP\\] id=([^ ]+) pipeline=(0x[0-9a-fA-F]+)", line))
+              if (match := re.search(r"\[STAUBLI_PIPELINE_MAP\] id=([^ ]+) pipeline=(0x[0-9a-fA-F]+)", line))
           }
           if "ompl" not in pipeline_ids or len(pipeline_ids) < 2 or len(pipeline_ptrs) < 2:
               raise SystemExit(f"MoveItCpp did not expose at least two distinct runtime pipelines: ids={pipeline_ids}, pointers={pipeline_ptrs}")
