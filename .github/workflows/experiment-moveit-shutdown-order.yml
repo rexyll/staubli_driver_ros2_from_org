@@ -352,9 +352,6 @@ jobs:
               and "staubli_test_probe_status" in source
               and "CallbackGroupType::Reentrant" in source
               and "staubli_probe_status_service" in source
-              and "StaubliSolveBarrierProbe" in planning_interface_source
-              and "armStaubliSolveBarrier" in pilz_context_source
-              and "staubli_solve_barrier_entered_" in pilz_context_source
               and "terminatePlanningPipeline" in source
           ):
               raise SystemExit("MoveItCpp terminate-probe service static validation failed.") 
@@ -1045,6 +1042,13 @@ jobs:
               raise SystemExit("Expected exactly one Pilz PlanningContextBase::terminate() implementation.")
           pilz_context_source = pilz_context_source.replace(old_pilz_terminate, new_pilz_terminate, 1)
           pilz_context_path.write_text(pilz_context_source)
+          if not (
+              "class StaubliSolveBarrierProbe" in planning_interface_source
+              and "public planning_interface::StaubliSolveBarrierProbe" in pilz_context_source
+              and "armStaubliSolveBarrier" in pilz_context_source
+              and "staubli_solve_barrier_entered_" in pilz_context_source
+          ):
+              raise SystemExit("Pilz in-flight solve barrier overlay validation failed.")
 
           if not (
               "[PSM-DTOR] BEGIN" in psm_source
