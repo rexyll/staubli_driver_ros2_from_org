@@ -2049,7 +2049,8 @@ jobs:
               and "solve_done=0" in inflight_terminated[0]
               and "success=1" in inflight_released[0]
               and "code=1" in inflight_released[0]
-              and "planning_failed=1" in cross_target[0]
+              and "success=1" in cross_target[0]
+              and "code=1" in cross_target[0]
               and "success=1" in cross_control[0]
           ):
               raise SystemExit(
