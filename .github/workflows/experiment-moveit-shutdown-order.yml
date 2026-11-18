@@ -253,12 +253,18 @@ jobs:
                     nh->set_parameter(rclcpp::Parameter("staubli_test_release_cross_pipeline", true));
                     return;
                   }
+                  std::fprintf(stderr, "[STAUBLI_CROSS_PIPELINE] B_CONTEXT_CREATED context=%p\\n",
+                               static_cast<const void*>(target_context.get()));
+                  std::fflush(stderr);
                   const bool pilz_active_before = pilz_pipeline->isActive();
                   std::fprintf(stderr,
                                "[STAUBLI_CROSS_PIPELINE] B_PIPELINE_REQUEST_ACTIVE active=%d context=%p\\n",
                                pilz_active_before ? 1 : 0, static_cast<const void*>(target_context.get()));
                   std::fflush(stderr);
                   const bool wrapper_result = moveit_cpp->terminatePlanningPipeline("ompl");
+                  std::fprintf(stderr, "[STAUBLI_CROSS_PIPELINE] A_WRAPPER_RETURN active_before=%d result=%d\\n",
+                               active_before ? 1 : 0, wrapper_result ? 1 : 0);
+                  std::fflush(stderr);
                   const bool inflight_done_while_held = pilz_request_done.load();
                   const bool terminated_while_held = solve_barrier->staubliContextTerminated();
                   std::fprintf(stderr,
@@ -275,6 +281,9 @@ jobs:
                                "[STAUBLI_PILZ_INFLIGHT] SOLVE_RELEASED context=%p success=%d code=%d\\n",
                                static_cast<const void*>(target_context.get()), inflight_success ? 1 : 0,
                                inflight_response.error_code.val);
+                  std::fprintf(stderr, "[STAUBLI_CROSS_PIPELINE] B_TARGET_SOLVE context=%p success=%d code=%d\\n",
+                               static_cast<const void*>(target_context.get()), inflight_success ? 1 : 0,
+                               inflight_response.error_code.val);
                   std::fflush(stderr);
                   moveit_msgs::msg::MoveItErrorCodes control_error;
                   auto control_context =
@@ -287,6 +296,9 @@ jobs:
                     control_success =
                         control_response.error_code.val == moveit_msgs::msg::MoveItErrorCodes::SUCCESS;
                   }
+                  std::fprintf(stderr, "[STAUBLI_CROSS_PIPELINE] B_CONTROL_SOLVE success=%d\\n",
+                               control_success ? 1 : 0);
+                  std::fflush(stderr);
                   response->success = active_before && wrapper_result && inflight_entered &&
                                       pilz_active_before && !inflight_done_while_held &&
                                       !terminated_while_held && inflight_success && control_success;
@@ -1236,6 +1248,9 @@ jobs:
               solve_probe = """  if (staubli_solve_barrier_armed_.exchange(false))
             {
               staubli_solve_barrier_entered_.store(true);
+              std::fprintf(stderr, "[STAUBLI_PILZ_INFLIGHT] SOLVE_ENTERED context=%p\\n",
+                           static_cast<const void*>(this));
+              std::fflush(stderr);
               const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
               while (!staubli_solve_barrier_release_.load() &&
                      std::chrono::steady_clock::now() < deadline)
@@ -2003,32 +2018,32 @@ jobs:
           inflight_released = [line for line in lines if "[STAUBLI_PILZ_INFLIGHT] SOLVE_RELEASED " in line]
           cross_client = [line for line in lines if "[STAUBLI_CROSS_PIPELINE_CLIENT] PASS " in line]
           cross_release = [line for line in lines if "[STAUBLI_CROSS_PIPELINE] RELEASE signal=1" in line]
-          pilz_before = [line for line in lines if "[STAUBLI_PILZ_TERMINATE] " in line and "before=0" in line]
-          pilz_after = [line for line in lines if "[STAUBLI_PILZ_TERMINATE] " in line and "after=1" in line]
+          pilz_terminate_calls = [line for line in lines if "[STAUBLI_PILZ_TERMINATE] " in line]
           if not all(len(items) == 1 for items in (
               cross_held, cross_context, cross_wrapper, cross_target, cross_control,
               inflight_entered, inflight_terminated, inflight_released,
-              cross_client, cross_release, pilz_before, pilz_after
-          )):
+              cross_client, cross_release
+          )) or pilz_terminate_calls:
               raise SystemExit(
                   "Cross-pipeline markers missing/duplicated: "
                   f"held={len(cross_held)} context={len(cross_context)} wrapper={len(cross_wrapper)} "
                   f"inflight_entered={len(inflight_entered)} inflight_terminated={len(inflight_terminated)} "
                   f"inflight_released={len(inflight_released)} target={len(cross_target)} "
                   f"control={len(cross_control)} client={len(cross_client)} release={len(cross_release)} "
-                  f"pilz_before={len(pilz_before)} pilz_after={len(pilz_after)}"
+                  f"unexpected_pilz_terminate={len(pilz_terminate_calls)}"
               )
           if not re.search(r"active=1", cross_held[0]) or not re.search(r"active_before=1 result=1", cross_wrapper[0]):
               raise SystemExit(f"OMPL was not active at terminate: held={cross_held}, wrapper={cross_wrapper}")
           target_ptr = re.search(r"context=(0x[0-9a-fA-F]+)", cross_context[0])
-          terminate_ptr = re.search(r"this=(0x[0-9a-fA-F]+)", pilz_before[0])
-          after_ptr = re.search(r"this=(0x[0-9a-fA-F]+)", pilz_after[0])
-          if not target_ptr or not terminate_ptr or not after_ptr:
-              raise SystemExit("Could not parse Pilz context/terminate object pointers.")
-          if target_ptr.group(1) != terminate_ptr.group(1) or target_ptr.group(1) != after_ptr.group(1):
-              raise SystemExit(
-                  f"Pilz terminate pointer mismatch: target={target_ptr.group(1)} before={terminate_ptr.group(1)} after={after_ptr.group(1)}"
-              )
+          if not target_ptr:
+              raise SystemExit("Could not parse target Pilz context pointer.")
+          terminated_ptr = re.search(r"context=(0x[0-9a-fA-F]+)", inflight_terminated[0])
+          released_ptr = re.search(r"context=(0x[0-9a-fA-F]+)", inflight_released[0])
+          entered_ptr = re.search(r"context=(0x[0-9a-fA-F]+)", inflight_entered[0])
+          if not all((terminated_ptr, released_ptr, entered_ptr)) or any(
+              item.group(1) != target_ptr.group(1) for item in (terminated_ptr, released_ptr, entered_ptr)
+          ):
+              raise SystemExit("Pilz target context pointer mismatch across create/enter/terminate-observe/release markers.")
           if not (
               "terminated=1" in inflight_terminated[0]
               and "solve_done=0" in inflight_terminated[0]
@@ -2048,8 +2063,8 @@ jobs:
               raise SystemExit(f"OMPL cross-pipeline barrier did not release cleanly: {cross_released}")
           cross_order = [
               lines.index(cross_held[0]), lines.index(cross_context[0]), lines.index(inflight_entered[0]),
-              lines.index(terminate_entries[0]), lines.index(pilz_before[0]), lines.index(pilz_after[0]),
-              lines.index(cross_wrapper[0]), lines.index(inflight_terminated[0]), lines.index(inflight_released[0]),
+              lines.index(terminate_entries[0]), lines.index(cross_wrapper[0]),
+              lines.index(inflight_terminated[0]), lines.index(inflight_released[0]),
               lines.index(cross_target[0]), lines.index(cross_control[0]), lines.index(cross_release[0]),
               lines.index(cross_released[0])
           ]
