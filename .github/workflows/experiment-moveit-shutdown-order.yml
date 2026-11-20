@@ -859,12 +859,14 @@ jobs:
                 return true;
               }
 
-              void finish()
+              bool finish()
               {
                 std::unique_lock<std::mutex> lock(mutex);
                 completed = true;
                 condition.wait(lock, [this]() { return !terminate_in_flight; });
+                const bool cancelled = cancel_requested;
                 context.reset();
+                return cancelled;
               }
             };
 
@@ -872,10 +874,22 @@ jobs:
             {
               const PlanningPipeline* owner;
               std::shared_ptr<RequestToken> token;
+              bool finished{ false };
+              bool cancellation_won{ false };
+
+              bool finish()
+              {
+                if (finished)
+                  return cancellation_won;
+                finished = true;
+                cancellation_won = token->finish();
+                owner->unregisterActiveRequest(token);
+                return cancellation_won;
+              }
+
               ~RequestGuard()
               {
-                token->finish();
-                owner->unregisterActiveRequest(token);
+                finish();
               }
             };
 
@@ -921,6 +935,14 @@ jobs:
           probe_code = """  auto request_token = std::make_shared<RequestToken>();
             registerActiveRequest(request_token);
             RequestGuard request_guard{ this, request_token };
+            auto finalize_request = [&](bool success) {
+              if (request_guard.finish())
+              {
+                res.error_code = moveit::core::MoveItErrorCode::PLANNING_FAILED;
+                return false;
+              }
+              return success;
+            };
 
             // CI-only deterministic probe. Disabled unless explicitly enabled by the test job.
             const char* staubli_probe_env = std::getenv("STAUBLI_ACTIVE_PROBE");
@@ -1446,6 +1468,21 @@ jobs:
           ) if "#include <algorithm>" in pipeline_source else pipeline_source.replace(
               "#include <atomic>\n", "#include <algorithm>\n#include <atomic>\n", 1
           )
+          # The request's completion linearization point must occur before the
+          # generatePlan return value is committed. If cancellation wins the token
+          # mutex first, every return path reports internal PLANNING_FAILED.
+          generate_start = pipeline_source.index("bool PlanningPipeline::generatePlan(")
+          terminate_start = pipeline_source.index("void PlanningPipeline::terminate()", generate_start)
+          generate_body = pipeline_source[generate_start:terminate_start]
+          if "auto finalize_request = [&](bool success)" not in generate_body:
+              raise SystemExit("Request completion finalizer was not injected into generatePlan.")
+          generate_body = generate_body.replace("return false;", "return finalize_request(false);")
+          generate_body = generate_body.replace(
+              "return static_cast<bool>(res);", "return finalize_request(static_cast<bool>(res));"
+          )
+          if "return false;" in generate_body or "return static_cast<bool>(res);" in generate_body:
+              raise SystemExit("A generatePlan return path bypasses request finish/cancel linearization.")
+          pipeline_source = pipeline_source[:generate_start] + generate_body + pipeline_source[terminate_start:]
           pipeline_path.write_text(pipeline_source)
           if not (
               pipeline_source.count("STAUBLI_ACTIVE_PROBE") >= 8
