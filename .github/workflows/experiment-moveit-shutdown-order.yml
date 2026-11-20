@@ -718,7 +718,7 @@ jobs:
               raise SystemExit("Unexpected MoveGroupContext include anchor.")
           context_source = context_source.replace(
               context_include_anchor,
-              "#include <cstdio>\\n#include <cstdlib>\\n" + context_include_anchor,
+              "#include <cstdio>\n#include <cstdlib>\n" + context_include_anchor,
               1
           )
           old_default_selection = """  const auto default_pipeline_it = pipelines.find(default_planning_pipeline);
@@ -2401,7 +2401,7 @@ jobs:
           # merely accepting an aggregate count.
           cross_terminate_entries = [
               line for line in terminate_entries
-              if lines.index(inflight_entered[0]) < lines.index(line) < lines.index(cross_wrapper[0])
+              if lines.index(cross_held[0]) < lines.index(line) < lines.index(cross_wrapper[0])
           ]
           same_pipeline_terminate_entries = [
               line for line in terminate_entries
