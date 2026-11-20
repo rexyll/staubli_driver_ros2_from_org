@@ -167,8 +167,14 @@ jobs:
                   std::fprintf(stderr, "[STAUBLI_TERMINATE_PROBE] WRAPPER_RETURN active_before=%d result=%d\\n",
                                active_before ? 1 : 0, wrapper_result ? 1 : 0);
                   std::fflush(stderr);
-                  response->success = wrapper_result;
-                  response->message = "MoveItCpp terminatePlanningPipeline invoked";
+                  const bool token_lifecycle_ok =
+                      pipeline != pipelines.end() && pipeline->second &&
+                      pipeline->second->staubliTestRequestTokenLifecycle();
+                  std::fprintf(stderr, "[STAUBLI_TOKEN_LIFECYCLE] pass=%d\\n", token_lifecycle_ok ? 1 : 0);
+                  std::fflush(stderr);
+                  response->success = wrapper_result && token_lifecycle_ok;
+                  response->message = "MoveItCpp terminatePlanningPipeline invoked; token lifecycle probe " +
+                                      std::string(token_lifecycle_ok ? "passed" : "failed");
                   const auto release_result =
                       nh->set_parameter(rclcpp::Parameter("staubli_test_release_slow", true));
                   std::fprintf(stderr, "[STAUBLI_TERMINATE_PROBE] RELEASE slow=%d\\n",
@@ -692,7 +698,7 @@ jobs:
           if "#include <mutex>" not in pipeline_header:
               pipeline_header = pipeline_header.replace(
                   "#include <memory>\n",
-                  "#include <memory>\n#include <mutex>\n#include <vector>\n",
+                  "#include <memory>\n#include <condition_variable>\n#include <mutex>\n#include <vector>\n",
                   1
               )
           old_active_accessor = "  [[nodiscard]] bool isActive() const\n  {\n    return active_;\n  }"
@@ -708,6 +714,7 @@ jobs:
                   "\nprivate:\n",
                   "\n  // CI-only inspection hook for the request-ownership regression.\n"
                   "  planning_interface::PlanningContextPtr staubliTestLatestContext() const;\n"
+                  "  bool staubliTestRequestTokenLifecycle() const;\n"
                   "\nprivate:\n",
                   1
               )
@@ -715,36 +722,88 @@ jobs:
           request_token_block = """  struct RequestToken
             {
               mutable std::mutex mutex;
-              std::atomic<bool> cancel_requested{ false };
+              std::condition_variable condition;
+              bool cancel_requested{ false };
+              bool completed{ false };
+              bool terminate_dispatched{ false };
+              bool terminate_in_flight{ false };
               planning_interface::PlanningContextPtr context;
 
               bool isCancelled() const
               {
-                return cancel_requested.load();
+                std::lock_guard<std::mutex> lock(mutex);
+                return cancel_requested;
+              }
+
+              void completeTermination()
+              {
+                {
+                  std::lock_guard<std::mutex> lock(mutex);
+                  terminate_in_flight = false;
+                }
+                condition.notify_all();
+              }
+
+              void dispatchTermination(const planning_interface::PlanningContextPtr& value)
+              {
+                try
+                {
+                  if (value)
+                    value->terminate();
+                }
+                catch (...)
+                {
+                  completeTermination();
+                  throw;
+                }
+                completeTermination();
               }
 
               void attachContext(const planning_interface::PlanningContextPtr& value)
               {
-                bool cancel_now = false;
+                bool dispatch = false;
                 {
                   std::lock_guard<std::mutex> lock(mutex);
+                  if (completed)
+                    return;
                   context = value;
-                  cancel_now = cancel_requested.load();
+                  if (cancel_requested && value && !terminate_dispatched)
+                  {
+                    terminate_dispatched = true;
+                    terminate_in_flight = true;
+                    dispatch = true;
+                  }
                 }
-                if (cancel_now && value)
-                  value->terminate();
+                if (dispatch)
+                  dispatchTermination(value);
               }
 
-              void requestCancel()
+              bool requestCancel()
               {
                 planning_interface::PlanningContextPtr value;
                 {
                   std::lock_guard<std::mutex> lock(mutex);
-                  cancel_requested.store(true);
-                  value = context;
+                  if (completed)
+                    return false;
+                  cancel_requested = true;
+                  if (context && !terminate_dispatched)
+                  {
+                    terminate_dispatched = true;
+                    terminate_in_flight = true;
+                    value = context;
+                  }
                 }
                 if (value)
-                  value->terminate();
+                  dispatchTermination(value);
+                return true;
+              }
+
+              void finish()
+              {
+                std::unique_lock<std::mutex> lock(mutex);
+                completed = true;
+                condition.wait(lock, [this]() { return !terminate_in_flight; });
+                context.reset();
               }
             };
 
@@ -754,6 +813,7 @@ jobs:
               std::shared_ptr<RequestToken> token;
               ~RequestGuard()
               {
+                token->finish();
                 owner->unregisterActiveRequest(token);
               }
             };
@@ -1093,10 +1153,11 @@ jobs:
             {
               if (request)
               {
-                request->requestCancel();
+                const bool cancel_accepted = request->requestCancel();
                 std::fprintf(stderr,
-                             "[STAUBLI_REQUEST_TOKEN] CANCEL_REQUESTED pipeline=%p token=%p\\n",
-                             static_cast<const void*>(this), static_cast<const void*>(request.get()));
+                             "[STAUBLI_REQUEST_TOKEN] CANCEL_REQUESTED pipeline=%p token=%p accepted=%d\\n",
+                             static_cast<const void*>(this), static_cast<const void*>(request.get()),
+                             cancel_accepted ? 1 : 0);
                 std::fflush(stderr);
               }
             }
@@ -1145,6 +1206,171 @@ jobs:
                 return (*it)->context;
             }
             return nullptr;
+          }
+
+          bool PlanningPipeline::staubliTestRequestTokenLifecycle() const
+          {
+            class RecordingContext final : public planning_interface::PlanningContext
+            {
+            public:
+              explicit RecordingContext(const std::string& name) : PlanningContext(name, "arm")
+              {
+              }
+
+              void solve(planning_interface::MotionPlanResponse&) override
+              {
+              }
+
+              void solve(planning_interface::MotionPlanDetailedResponse&) override
+              {
+              }
+
+              bool terminate() override
+              {
+                terminate_calls.fetch_add(1);
+                if (finish_returned.load())
+                  late_termination.store(true);
+                terminate_entered.store(true);
+                while (block_termination.load() && !release_termination.load())
+                  std::this_thread::yield();
+                if (finish_returned.load())
+                  late_termination.store(true);
+                return true;
+              }
+
+              void clear() override
+              {
+              }
+
+              std::atomic<int> terminate_calls{ 0 };
+              std::atomic<bool> block_termination{ false };
+              std::atomic<bool> terminate_entered{ false };
+              std::atomic<bool> release_termination{ false };
+              std::atomic<bool> finish_returned{ false };
+              std::atomic<bool> late_termination{ false };
+            };
+
+            const auto registry_size = [this]() {
+              std::lock_guard<std::mutex> lock(active_requests_mutex_);
+              return active_requests_.size();
+            };
+            const size_t registry_baseline = registry_size();
+
+            // Simulate a terminate() snapshot retaining a shared_ptr after the request finishes.
+            auto completed_context = std::make_shared<RecordingContext>("completed-before-cancel");
+            auto completed_token = std::make_shared<RequestToken>();
+            registerActiveRequest(completed_token);
+            completed_token->attachContext(completed_context);
+            const auto stale_snapshot = completed_token;
+            completed_token->finish();
+            completed_context->finish_returned.store(true);
+            unregisterActiveRequest(completed_token);
+            if (stale_snapshot->requestCancel() || completed_context->terminate_calls.load() != 0 ||
+                completed_context->late_termination.load() || registry_size() != registry_baseline)
+              return false;
+
+            // Sticky cancellation must survive context creation that occurs after terminate().
+            auto cancel_before_attach = std::make_shared<RequestToken>();
+            auto late_context = std::make_shared<RecordingContext>("cancel-before-attach");
+            if (!cancel_before_attach->requestCancel())
+              return false;
+            cancel_before_attach->attachContext(late_context);
+            cancel_before_attach->finish();
+            late_context->finish_returned.store(true);
+            if (late_context->terminate_calls.load() != 1 || late_context->late_termination.load() ||
+                cancel_before_attach->requestCancel())
+              return false;
+
+            // Context attachment before cancellation must dispatch once, even for repeated terminate calls.
+            auto attach_before_cancel = std::make_shared<RequestToken>();
+            auto attached_context = std::make_shared<RecordingContext>("attach-before-cancel");
+            attach_before_cancel->attachContext(attached_context);
+            const bool first_cancel = attach_before_cancel->requestCancel();
+            const bool repeated_cancel = attach_before_cancel->requestCancel();
+            attach_before_cancel->finish();
+            attached_context->finish_returned.store(true);
+            if (!first_cancel || !repeated_cancel || attached_context->terminate_calls.load() != 1 ||
+                attached_context->late_termination.load() || attach_before_cancel->requestCancel())
+              return false;
+
+            // finish() must wait for a terminate() call that already crossed the token mutex.
+            auto blocking_token = std::make_shared<RequestToken>();
+            auto blocking_context = std::make_shared<RecordingContext>("finish-waits-for-terminate");
+            blocking_context->block_termination.store(true);
+            blocking_token->attachContext(blocking_context);
+            std::atomic<bool> blocking_cancel_accepted{ false };
+            std::thread cancel_thread([&]() {
+              blocking_cancel_accepted.store(blocking_token->requestCancel());
+            });
+            const auto entered_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+            while (!blocking_context->terminate_entered.load() &&
+                   std::chrono::steady_clock::now() < entered_deadline)
+              std::this_thread::yield();
+            if (!blocking_context->terminate_entered.load())
+            {
+              blocking_context->release_termination.store(true);
+              cancel_thread.join();
+              blocking_token->finish();
+              return false;
+            }
+            std::atomic<bool> finish_returned{ false };
+            std::thread finish_thread([&]() {
+              blocking_token->finish();
+              blocking_context->finish_returned.store(true);
+              finish_returned.store(true);
+            });
+            bool completion_waiting_for_terminate = false;
+            const auto finish_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+            while (std::chrono::steady_clock::now() < finish_deadline)
+            {
+              {
+                std::lock_guard<std::mutex> lock(blocking_token->mutex);
+                completion_waiting_for_terminate =
+                    blocking_token->completed && blocking_token->terminate_in_flight;
+              }
+              if (completion_waiting_for_terminate)
+                break;
+              std::this_thread::yield();
+            }
+            const bool finish_returned_early = finish_returned.load();
+            blocking_context->release_termination.store(true);
+            cancel_thread.join();
+            finish_thread.join();
+            if (!completion_waiting_for_terminate || finish_returned_early ||
+                !blocking_cancel_accepted.load() || !finish_returned.load() ||
+                blocking_context->terminate_calls.load() != 1 || blocking_context->late_termination.load())
+              return false;
+
+            // Exercise both mutex linearization orders repeatedly.  Accepted cancel means
+            // terminate completes before finish returns; otherwise finish won and cancel is ignored.
+            for (int iteration = 0; iteration < 32; ++iteration)
+            {
+              auto race_token = std::make_shared<RequestToken>();
+              auto race_context = std::make_shared<RecordingContext>("finish-cancel-race");
+              race_token->attachContext(race_context);
+              std::atomic<bool> start{ false };
+              std::atomic<bool> accepted{ false };
+              std::thread race_cancel([&]() {
+                while (!start.load())
+                  std::this_thread::yield();
+                accepted.store(race_token->requestCancel());
+              });
+              std::thread race_finish([&]() {
+                while (!start.load())
+                  std::this_thread::yield();
+                race_token->finish();
+                race_context->finish_returned.store(true);
+              });
+              start.store(true);
+              race_cancel.join();
+              race_finish.join();
+              const int expected_terminations = accepted.load() ? 1 : 0;
+              if (race_context->terminate_calls.load() != expected_terminations ||
+                  race_context->late_termination.load() || race_token->requestCancel())
+                return false;
+            }
+
+            return registry_size() == registry_baseline;
           }
 
           """
