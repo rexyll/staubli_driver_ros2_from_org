@@ -728,43 +728,26 @@ jobs:
               "#include <cstdio>\n#include <cstdlib>\n" + context_include_anchor,
               1
           )
-          old_default_selection = """  const auto default_pipeline_it = pipelines.find(default_planning_pipeline);
-          if (default_pipeline_it != pipelines.end())
-          {
-            planning_pipeline_ = default_pipeline_it->second;
-          }
-          else
-          {
-            RCLCPP_ERROR(
-                getLogger(),
-                "Failed to find default PlanningPipeline '%s' - please check MoveGroup's planning pipeline configuration.",
-                default_planning_pipeline.c_str());
-          }"""
+          old_default_selection = "  const auto default_pipeline_it = pipelines.find(default_planning_pipeline);"
           new_default_selection = """  const char* force_pilz_default = std::getenv("STAUBLI_FORCE_DEFAULT_PILZ");
           const bool force_pilz = force_pilz_default != nullptr &&
                                   force_pilz_default[0] == '1' && force_pilz_default[1] == '\\0';
           const auto default_pipeline_it = pipelines.find(
-              force_pilz ? "pilz_industrial_motion_planner" : default_planning_pipeline);
-          if (default_pipeline_it != pipelines.end())
-          {
-            planning_pipeline_ = default_pipeline_it->second;
+              force_pilz ? "pilz_industrial_motion_planner" : default_planning_pipeline);"""
+          if context_source.count(old_default_selection) != 1:
+              raise SystemExit("Expected one MoveGroupContext default pipeline lookup.")
+          context_source = context_source.replace(old_default_selection, new_default_selection, 1)
+          old_default_assignment = "    planning_pipeline_ = default_pipeline_it->second;"
+          new_default_assignment = """    planning_pipeline_ = default_pipeline_it->second;
             if (force_pilz)
             {
               std::fprintf(stderr, "[STAUBLI_SEQUENCE_ROUTE] DEFAULT id=pilz_industrial_motion_planner pipeline=%p\\n",
                            static_cast<const void*>(planning_pipeline_.get()));
               std::fflush(stderr);
-            }
-          }
-          else
-          {
-            RCLCPP_ERROR(
-                getLogger(),
-                "Failed to find default PlanningPipeline '%s' - please check MoveGroup's planning pipeline configuration.",
-                force_pilz ? "pilz_industrial_motion_planner" : default_planning_pipeline.c_str());
-          }"""
-          if context_source.count(old_default_selection) != 1:
-              raise SystemExit("Expected one MoveGroupContext default pipeline selection block.")
-          context_source = context_source.replace(old_default_selection, new_default_selection, 1)
+            }"""
+          if context_source.count(old_default_assignment) != 1:
+              raise SystemExit("Expected one MoveGroupContext default pipeline assignment.")
+          context_source = context_source.replace(old_default_assignment, new_default_assignment, 1)
           context_path.write_text(context_source)
           print("Applied CI-only SequenceService selected-pipeline dispatch probe with Pilz default / explicit OMPL request.")
 
