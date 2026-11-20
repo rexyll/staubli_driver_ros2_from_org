@@ -2068,14 +2068,54 @@ jobs:
                   "Pilz in-flight/after-terminate/negative-control state mismatch: "
                   f"inflight={inflight_terminated}/{inflight_released}, target={cross_target}, control={cross_control}"
               )
-          if len(terminate_entries) != 1:
-              raise SystemExit(f"Expected one actual PlanningPipeline::terminate entry, got {terminate_entries}")
+          if len(terminate_entries) != 2:
+              raise SystemExit(
+                  "Expected exactly two actual PlanningPipeline::terminate entries "
+                  "(one cross-pipeline isolation call and one same-pipeline overlap call), "
+                  f"got {terminate_entries}"
+              )
+          # The regression deliberately invokes terminate once in each independent scenario.
+          # Prove that each real entry belongs to its intended barrier interval, rather than
+          # merely accepting an aggregate count.
+          cross_terminate_entries = [
+              line for line in terminate_entries
+              if lines.index(inflight_entered[0]) < lines.index(line) < lines.index(cross_wrapper[0])
+          ]
+          same_pipeline_terminate_entries = [
+              line for line in terminate_entries
+              if lines.index(slow_held[0]) < lines.index(line) < lines.index(wrapper_calls[0])
+          ]
+          if len(cross_terminate_entries) != 1 or len(same_pipeline_terminate_entries) != 1:
+              raise SystemExit(
+                  "Actual terminate calls were not uniquely associated with both request scenarios: "
+                  f"cross={cross_terminate_entries}, same_pipeline={same_pipeline_terminate_entries}"
+              )
+          cross_pipeline_ptr = re.search(r"pipeline=(0x[0-9a-fA-F]+)", cross_held[0])
+          mapped_ompl = [
+              line for line in lines
+              if "[STAUBLI_PIPELINE_MAP] id=ompl " in line
+          ]
+          terminate_ptrs = [
+              re.search(r"this=(0x[0-9a-fA-F]+)", line)
+              for line in terminate_entries
+          ]
+          mapped_ompl_ptr = re.search(r"pipeline=(0x[0-9a-fA-F]+)", mapped_ompl[0]) if len(mapped_ompl) == 1 else None
+          if (
+              not cross_pipeline_ptr or not mapped_ompl_ptr
+              or any(ptr is None or ptr.group(1) != cross_pipeline_ptr.group(1) for ptr in terminate_ptrs)
+              or mapped_ompl_ptr.group(1) != cross_pipeline_ptr.group(1)
+          ):
+              raise SystemExit(
+                  "Both terminate entries must target the exact OMPL pipeline used by the "
+                  f"cross-pipeline and same-pipeline probes: held={cross_held}, map={mapped_ompl}, "
+                  f"terminate={terminate_entries}"
+              )
           cross_released = [line for line in lines if "[STAUBLI_CROSS_PIPELINE] A_OMPL_RELEASED released=1" in line]
           if len(cross_released) != 1:
               raise SystemExit(f"OMPL cross-pipeline barrier did not release cleanly: {cross_released}")
           cross_order = [
               lines.index(cross_held[0]), lines.index(cross_context[0]), lines.index(inflight_entered[0]),
-              lines.index(terminate_entries[0]), lines.index(cross_wrapper[0]),
+              lines.index(cross_terminate_entries[0]), lines.index(cross_wrapper[0]),
               lines.index(inflight_terminated[0]), lines.index(inflight_released[0]),
               lines.index(cross_target[0]), lines.index(cross_control[0]), lines.index(cross_release[0]),
               lines.index(cross_released[0])
@@ -2086,7 +2126,11 @@ jobs:
           service_releases = [line for line in lines if "[STAUBLI_TERMINATE_PROBE] RELEASE slow=1" in line]
           if len(slow_releases) != 1 or len(service_releases) != 1:
               raise SystemExit(f"Slow hold/release did not complete cleanly: slow={slow_releases}, service={service_releases}")
-          if not (lines.index(slow_held[0]) < lines.index(wrapper_calls[0]) < lines.index(service_releases[0]) < lines.index(slow_releases[0])):
+          if not (
+              lines.index(slow_held[0]) < lines.index(same_pipeline_terminate_entries[0])
+              < lines.index(wrapper_calls[0]) < lines.index(service_releases[0])
+              < lines.index(slow_releases[0])
+          ):
               raise SystemExit("Expected slow hold -> MoveItCpp wrapper -> release signal -> slow resume ordering.")
           psm_retained = [
               line for line in lines
