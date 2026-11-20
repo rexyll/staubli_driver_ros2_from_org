@@ -939,7 +939,7 @@ jobs:
               if (request_guard.finish())
               {
                 res.error_code = moveit::core::MoveItErrorCode::PLANNING_FAILED;
-                return false;
+                return static_cast<bool>(0);
               }
               return success;
             };
