@@ -38,18 +38,22 @@ jobs:
           echo "rosdep update failed after five attempts."
           exit 1
 
-      - name: Fetch and build stock ROS 2 Jazzy rclcpp overlay (no ASan, no source instrumentation)
+      - name: Fetch and build stock ROS 2 Jazzy rcl + rclcpp overlay (no ASan, no source instrumentation)
         shell: bash
         run: |
           set -eo pipefail
           source /opt/ros/jazzy/setup.bash
           mkdir -p /tmp/rclcpp_ws/src
+          # Keep the source overlay API-compatible with the checked-out Jazzy rclcpp.
+          # The hosted apt underlay can lag the Jazzy source branch and omit newer rcl APIs.
+          git clone --depth 1 --branch jazzy https://github.com/ros2/rcl.git /tmp/rclcpp_ws/src/rcl
           git clone --depth 1 --branch jazzy https://github.com/ros2/rclcpp.git /tmp/rclcpp_ws/src/rclcpp
+          git -C /tmp/rclcpp_ws/src/rcl diff --exit-code
           git -C /tmp/rclcpp_ws/src/rclcpp diff --exit-code
-          echo "Using pristine ROS 2 Jazzy rclcpp sources; no Executor, CallbackGroup, NodeBase, or DynamicStorage instrumentation."
-          rosdep install --from-paths /tmp/rclcpp_ws/src/rclcpp/rclcpp --ignore-src --rosdistro jazzy -y
+          echo "Using pristine ROS 2 Jazzy rcl + rclcpp sources; no Executor, CallbackGroup, NodeBase, or DynamicStorage instrumentation."
+          rosdep install --from-paths /tmp/rclcpp_ws/src --ignore-src --rosdistro jazzy -y
           cd /tmp/rclcpp_ws
-          colcon build --packages-select rclcpp --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_FLAGS='-O1 -g -fno-omit-frame-pointer' -DCMAKE_CXX_FLAGS='-O1 -g -fno-omit-frame-pointer' -DBUILD_TESTING=OFF
+          colcon build --packages-up-to rclcpp --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_FLAGS='-O1 -g -fno-omit-frame-pointer' -DCMAKE_CXX_FLAGS='-O1 -g -fno-omit-frame-pointer' -DBUILD_TESTING=OFF
 
       - name: Fetch MoveIt Jazzy source and apply A+K+B-core cleanup probe
         shell: bash
