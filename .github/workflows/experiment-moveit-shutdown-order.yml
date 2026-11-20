@@ -1077,6 +1077,13 @@ jobs:
           terminate_pattern = r"void PlanningPipeline::terminate\(\) const\n\{.*?\n\}\n\}  // namespace planning_pipeline"
           terminate_replacement = """void PlanningPipeline::terminate() const
           {
+            const char* terminate_probe_env = std::getenv("STAUBLI_TERMINATE_PROBE");
+            if (terminate_probe_env != nullptr && terminate_probe_env[0] == '1' && terminate_probe_env[1] == '\\0')
+            {
+              std::fprintf(stderr, "[STAUBLI_TERMINATE_PROBE] PIPELINE_TERMINATE_ENTER this=%p\\n",
+                           static_cast<const void*>(this));
+              std::fflush(stderr);
+            }
             std::vector<std::shared_ptr<RequestToken>> requests;
             {
               std::lock_guard<std::mutex> lock(active_requests_mutex_);
