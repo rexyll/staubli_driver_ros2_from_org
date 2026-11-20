@@ -687,8 +687,79 @@ jobs:
               and sequence_source.index("[SEQ-SERVICE] service reset END") < sequence_source.index("sequence_callback_group_.reset();")
           ):
               raise SystemExit("SequenceService callback-group ownership / teardown order validation failed.")
+          # Route the resolved request pipeline into CommandListManager and emit
+          # pointer evidence. This is a CI-only correction of the pinned upstream
+          # SequenceService dispatch defect; product/upstream sources stay untouched.
+          old_sequence_solve = "    traj_vec = command_list_manager_->solve(scene, context_->planning_pipeline_, req->request);"
+          new_sequence_solve = """    std::fprintf(stderr,
+                 "[STAUBLI_SEQUENCE_ROUTE] request=%s selected=%p default=%p received=%p\\n",
+                 req->request.items[0].req.pipeline_id.c_str(),
+                 static_cast<const void*>(planning_pipeline.get()),
+                 static_cast<const void*>(context_->planning_pipeline_.get()),
+                 static_cast<const void*>(planning_pipeline.get()));
+          std::fflush(stderr);
+          traj_vec = command_list_manager_->solve(scene, planning_pipeline, req->request);"""
+          if sequence_source.count(old_sequence_solve) != 1:
+              raise SystemExit("Expected one stock SequenceService CommandListManager pipeline argument.")
+          sequence_source = sequence_source.replace(old_sequence_solve, new_sequence_solve, 1)
+          if "command_list_manager_->solve(scene, planning_pipeline, req->request);" not in sequence_source:
+              raise SystemExit("SequenceService request-selected pipeline was not wired to CommandListManager.")
           sequence_source_path.write_text(sequence_source)
-          print("Applied isolated SequenceService callback-group treatment: reset service, then its dedicated group while plugin DSO is loaded.")
+
+          # Force MoveGroupContext's default to Pilz only in this CI process.
+          # SequenceService requests OMPL explicitly, so selected and default
+          # must be different objects for the route assertion to be meaningful.
+          context_path = Path(
+              "/tmp/moveit_ws/src/moveit2/moveit_ros/move_group/src/move_group_context.cpp"
+          )
+          context_source = context_path.read_text()
+          context_include_anchor = "#include <moveit/move_group/move_group_context.hpp>"
+          if context_source.count(context_include_anchor) != 1:
+              raise SystemExit("Unexpected MoveGroupContext include anchor.")
+          context_source = context_source.replace(
+              context_include_anchor,
+              "#include <cstdio>\\n#include <cstdlib>\\n" + context_include_anchor,
+              1
+          )
+          old_default_selection = """  const auto default_pipeline_it = pipelines.find(default_planning_pipeline);
+          if (default_pipeline_it != pipelines.end())
+          {
+            planning_pipeline_ = default_pipeline_it->second;
+          }
+          else
+          {
+            RCLCPP_ERROR(
+                getLogger(),
+                "Failed to find default PlanningPipeline '%s' - please check MoveGroup's planning pipeline configuration.",
+                default_planning_pipeline.c_str());
+          }"""
+          new_default_selection = """  const char* force_pilz_default = std::getenv("STAUBLI_FORCE_DEFAULT_PILZ");
+          const bool force_pilz = force_pilz_default != nullptr &&
+                                  force_pilz_default[0] == '1' && force_pilz_default[1] == '\\0';
+          const auto default_pipeline_it = pipelines.find(
+              force_pilz ? "pilz_industrial_motion_planner" : default_planning_pipeline);
+          if (default_pipeline_it != pipelines.end())
+          {
+            planning_pipeline_ = default_pipeline_it->second;
+            if (force_pilz)
+            {
+              std::fprintf(stderr, "[STAUBLI_SEQUENCE_ROUTE] DEFAULT id=pilz_industrial_motion_planner pipeline=%p\\n",
+                           static_cast<const void*>(planning_pipeline_.get()));
+              std::fflush(stderr);
+            }
+          }
+          else
+          {
+            RCLCPP_ERROR(
+                getLogger(),
+                "Failed to find default PlanningPipeline '%s' - please check MoveGroup's planning pipeline configuration.",
+                force_pilz ? "pilz_industrial_motion_planner" : default_planning_pipeline.c_str());
+          }"""
+          if context_source.count(old_default_selection) != 1:
+              raise SystemExit("Expected one MoveGroupContext default pipeline selection block.")
+          context_source = context_source.replace(old_default_selection, new_default_selection, 1)
+          context_path.write_text(context_source)
+          print("Applied CI-only SequenceService selected-pipeline dispatch probe with Pilz default / explicit OMPL request.")
 
           # Inject a deterministic, environment-gated same-pipeline concurrency probe.
           pipeline_header_path = Path(
@@ -1904,6 +1975,7 @@ jobs:
           export STAUBLI_ACTIVE_PROBE=1
           export STAUBLI_TERMINATE_PROBE=1
           export STAUBLI_CROSS_PIPELINE_PROBE=1
+          export STAUBLI_FORCE_DEFAULT_PILZ=1
           # Capture DSO unload events, then inspect each CallbackGroup weak ServiceBase
           # control block at the reproducible pnode_ teardown SIGSEGV.
           # This is diagnostic-only; it does not change MoveIt/rclcpp/driver source.
@@ -2233,8 +2305,32 @@ jobs:
               for line in pipeline_map_lines
               if (match := re.search(r"\[STAUBLI_PIPELINE_MAP\] id=([^ ]+) pipeline=(0x[0-9a-fA-F]+)", line))
           }
-          if "ompl" not in pipeline_ids or len(pipeline_ids) < 2 or len(pipeline_ptrs) < 2:
-              raise SystemExit(f"MoveItCpp did not expose at least two distinct runtime pipelines: ids={pipeline_ids}, pointers={pipeline_ptrs}")
+          if "ompl" not in pipeline_ids or "pilz_industrial_motion_planner" not in pipeline_ids or len(pipeline_ptrs) < 2:
+              raise SystemExit(f"MoveItCpp did not expose distinct OMPL and Pilz runtime pipelines: ids={pipeline_ids}, pointers={pipeline_ptrs}")
+          route_defaults = [line for line in lines if "[STAUBLI_SEQUENCE_ROUTE] DEFAULT " in line]
+          route_calls = [line for line in lines if "[STAUBLI_SEQUENCE_ROUTE] request=" in line]
+          if len(route_defaults) != 1 or len(route_calls) != 1:
+              raise SystemExit(
+                  f"Expected one forced Pilz default and one SequenceService route marker: "
+                  f"default={route_defaults}, route={route_calls}"
+              )
+          default_match = re.search(r"pipeline=(0x[0-9a-fA-F]+)", route_defaults[0])
+          route_match = re.search(
+              r"request=([^ ]+) selected=(0x[0-9a-fA-F]+) default=(0x[0-9a-fA-F]+) received=(0x[0-9a-fA-F]+)",
+              route_calls[0],
+          )
+          if not default_match or not route_match:
+              raise SystemExit(f"Could not parse SequenceService route pointer evidence: {route_defaults}/{route_calls}")
+          if not (
+              route_match.group(1) == "ompl"
+              and route_match.group(2) == route_match.group(4)
+              and route_match.group(3) == default_match.group(1)
+              and route_match.group(2) != route_match.group(3)
+          ):
+              raise SystemExit(
+                  "SequenceService pipeline dispatch mismatch: expected request=ompl, selected=received=OMPL, "
+                  f"default=Pilz and distinct; default={route_defaults[0]} route={route_calls[0]}"
+              )
           client_pass = [line for line in lines if "[STAUBLI_ACTIVE_PROBE_CLIENT] PASS plan=SUCCESS sequence=FAILURE terminate=wrapper_called" in line]
           if len(client_pass) != 1:
               raise SystemExit(f"Expected one successful concurrent service-client + terminate-wrapper assertion, observed {len(client_pass)}")
