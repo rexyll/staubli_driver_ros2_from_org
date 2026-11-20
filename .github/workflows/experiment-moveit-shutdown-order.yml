@@ -1345,10 +1345,10 @@ jobs:
             registerActiveRequest(completed_token);
             completed_token->attachContext(completed_context);
             const auto stale_snapshot = completed_token;
-            completed_token->finish();
+            const bool completed_cancelled = completed_token->finish();
             completed_context->finish_returned.store(true);
             unregisterActiveRequest(completed_token);
-            if (stale_snapshot->requestCancel() || completed_context->terminate_calls.load() != 0 ||
+            if (completed_cancelled || stale_snapshot->requestCancel() || completed_context->terminate_calls.load() != 0 ||
                 completed_context->late_termination.load() || registry_size() != registry_baseline)
               return false;
 
@@ -1358,9 +1358,9 @@ jobs:
             if (!cancel_before_attach->requestCancel())
               return false;
             cancel_before_attach->attachContext(late_context);
-            cancel_before_attach->finish();
+            const bool late_finish_cancelled = cancel_before_attach->finish();
             late_context->finish_returned.store(true);
-            if (late_context->terminate_calls.load() != 1 || late_context->late_termination.load() ||
+            if (!late_finish_cancelled || late_context->terminate_calls.load() != 1 || late_context->late_termination.load() ||
                 cancel_before_attach->requestCancel())
               return false;
 
@@ -1370,9 +1370,10 @@ jobs:
             attach_before_cancel->attachContext(attached_context);
             const bool first_cancel = attach_before_cancel->requestCancel();
             const bool repeated_cancel = attach_before_cancel->requestCancel();
-            attach_before_cancel->finish();
+            const bool attached_finish_cancelled = attach_before_cancel->finish();
             attached_context->finish_returned.store(true);
-            if (!first_cancel || !repeated_cancel || attached_context->terminate_calls.load() != 1 ||
+            if (!first_cancel || !repeated_cancel || !attached_finish_cancelled ||
+                attached_context->terminate_calls.load() != 1 ||
                 attached_context->late_termination.load() || attach_before_cancel->requestCancel())
               return false;
 
@@ -1397,8 +1398,9 @@ jobs:
               return false;
             }
             std::atomic<bool> finish_returned{ false };
+            std::atomic<bool> blocking_finish_cancelled{ false };
             std::thread finish_thread([&]() {
-              blocking_token->finish();
+              blocking_finish_cancelled.store(blocking_token->finish());
               blocking_context->finish_returned.store(true);
               finish_returned.store(true);
             });
@@ -1420,7 +1422,7 @@ jobs:
             cancel_thread.join();
             finish_thread.join();
             if (!completion_waiting_for_terminate || finish_returned_early ||
-                !blocking_cancel_accepted.load() || !finish_returned.load() ||
+                !blocking_cancel_accepted.load() || !blocking_finish_cancelled.load() || !finish_returned.load() ||
                 blocking_context->terminate_calls.load() != 1 || blocking_context->late_termination.load())
               return false;
 
@@ -1433,6 +1435,7 @@ jobs:
               race_token->attachContext(race_context);
               std::atomic<bool> start{ false };
               std::atomic<bool> accepted{ false };
+              std::atomic<bool> finish_cancelled{ false };
               std::thread race_cancel([&]() {
                 while (!start.load())
                   std::this_thread::yield();
@@ -1441,14 +1444,15 @@ jobs:
               std::thread race_finish([&]() {
                 while (!start.load())
                   std::this_thread::yield();
-                race_token->finish();
+                finish_cancelled.store(race_token->finish());
                 race_context->finish_returned.store(true);
               });
               start.store(true);
               race_cancel.join();
               race_finish.join();
               const int expected_terminations = accepted.load() ? 1 : 0;
-              if (race_context->terminate_calls.load() != expected_terminations ||
+              if (finish_cancelled.load() != accepted.load() ||
+                  race_context->terminate_calls.load() != expected_terminations ||
                   race_context->late_termination.load() || race_token->requestCancel())
                 return false;
             }
