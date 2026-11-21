@@ -2732,7 +2732,7 @@ jobs:
               if multi_release_index < index < multi_client_index
               and "[STAUBLI_MULTI_TOKEN] CANCEL_OBSERVED " in line
               and (token_match := re.search(r"token=(0x[0-9a-fA-F]+)", line))
-              and (code_match := re.search(r"code=(-?\\d+)", line))
+              and (code_match := re.search(r"code=(-?\d+)", line))
           ]
           multi_client_internal = [
               line for line in lines
