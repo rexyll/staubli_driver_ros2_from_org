@@ -2447,15 +2447,28 @@ jobs:
           # The regression deliberately invokes terminate once in each independent scenario.
           # Prove that each real entry belongs to its intended barrier interval, rather than
           # merely accepting an aggregate count.
-          cross_terminate_entries = [
-              line for line in terminate_entries
-              if lines.index(cross_held[0]) < lines.index(line) < lines.index(cross_wrapper[0])
+          # Keep each event's physical line position. Using lines.index(line) here is
+          # incorrect because both terminate calls intentionally print the same text
+          # (same PlanningPipeline address), so index() resolves both to the first event.
+          cross_held_index = next(i for i, line in enumerate(lines) if "[STAUBLI_CROSS_PIPELINE] A_OMPL_HELD " in line)
+          cross_wrapper_index = next(i for i, line in enumerate(lines) if "[STAUBLI_CROSS_PIPELINE] A_WRAPPER_RETURN " in line)
+          slow_held_index = next(i for i, line in enumerate(lines) if "[STAUBLI_TERMINATE_PROBE] SLOW_HELD " in line)
+          wrapper_return_index = next(i for i, line in enumerate(lines) if "[STAUBLI_TERMINATE_PROBE] WRAPPER_RETURN " in line)
+          terminate_events = [
+              (i, line) for i, line in enumerate(lines)
+              if "[STAUBLI_TERMINATE_PROBE] PIPELINE_TERMINATE_ENTER " in line
           ]
-          same_pipeline_terminate_entries = [
-              line for line in terminate_entries
-              if lines.index(slow_held[0]) < lines.index(line) < lines.index(wrapper_calls[0])
+          cross_terminate_events = [
+              event for event in terminate_events
+              if cross_held_index < event[0] < cross_wrapper_index
           ]
-          if len(cross_terminate_entries) != 1 or len(same_pipeline_terminate_entries) != 1:
+          same_pipeline_terminate_events = [
+              event for event in terminate_events
+              if slow_held_index < event[0] < wrapper_return_index
+          ]
+          cross_terminate_entries = [line for _, line in cross_terminate_events]
+          same_pipeline_terminate_entries = [line for _, line in same_pipeline_terminate_events]
+          if len(cross_terminate_events) != 1 or len(same_pipeline_terminate_events) != 1:
               raise SystemExit(
                   "Actual terminate calls were not uniquely associated with both request scenarios: "
                   f"cross={cross_terminate_entries}, same_pipeline={same_pipeline_terminate_entries}"
@@ -2485,7 +2498,7 @@ jobs:
               raise SystemExit(f"OMPL cross-pipeline barrier did not release cleanly: {cross_released}")
           cross_order = [
               lines.index(cross_held[0]), lines.index(cross_context[0]), lines.index(inflight_entered[0]),
-              lines.index(cross_terminate_entries[0]), lines.index(cross_wrapper[0]),
+              cross_terminate_events[0][0], lines.index(cross_wrapper[0]),
               lines.index(inflight_terminated[0]), lines.index(inflight_released[0]),
               lines.index(cross_target[0]), lines.index(cross_control[0]), lines.index(cross_release[0]),
               lines.index(cross_released[0])
@@ -2497,8 +2510,8 @@ jobs:
           if len(slow_releases) != 1 or len(service_releases) != 1:
               raise SystemExit(f"Slow hold/release did not complete cleanly: slow={slow_releases}, service={service_releases}")
           if not (
-              lines.index(slow_held[0]) < lines.index(same_pipeline_terminate_entries[0])
-              < lines.index(wrapper_calls[0]) < lines.index(service_releases[0])
+              slow_held_index < same_pipeline_terminate_events[0][0]
+              < wrapper_return_index < lines.index(service_releases[0])
               < lines.index(slow_releases[0])
           ):
               raise SystemExit("Expected slow hold -> MoveItCpp wrapper -> release signal -> slow resume ordering.")
