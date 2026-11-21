@@ -207,10 +207,13 @@ jobs:
                     std::fprintf(stderr, "[STAUBLI_MULTI_TOKEN] RELEASE signal=%d\\n",
                                  multi_release_result.successful ? 1 : 0);
                   }
-                  const auto release_result =
-                      nh->set_parameter(rclcpp::Parameter("staubli_test_release_slow", true));
-                  std::fprintf(stderr, "[STAUBLI_TERMINATE_PROBE] RELEASE slow=%d\\n",
-                               release_result.successful ? 1 : 0);
+                  else
+                  {
+                    const auto release_result =
+                        nh->set_parameter(rclcpp::Parameter("staubli_test_release_slow", true));
+                    std::fprintf(stderr, "[STAUBLI_TERMINATE_PROBE] RELEASE slow=%d\\n",
+                                 release_result.successful ? 1 : 0);
+                  }
                   std::fflush(stderr);
                 }, rmw_qos_profile_services_default, staubli_probe_callback_group);
             staubli_cross_pipeline_service = nh->create_service<std_srvs::srv::Trigger>(
@@ -1718,15 +1721,8 @@ jobs:
               ompl_context_source = ompl_context_source.replace(
                   include_anchor, include_anchor + "#include <cstdio>\n", 1
               )
-          ompl_terminate_anchor = """bool ModelBasedPlanningContext::terminate()
-{
-  std::unique_lock<std::mutex> slock(ptc_lock_);"""
-          ompl_terminate_probe = """bool ModelBasedPlanningContext::terminate()
-{
-  std::fprintf(stderr, "[STAUBLI_OMPL_CONTEXT_TERMINATE] context=%p\\n",
-               static_cast<const void*>(this));
-  std::fflush(stderr);
-  std::unique_lock<std::mutex> slock(ptc_lock_);"""
+          ompl_terminate_anchor = "bool ModelBasedPlanningContext::terminate()\n{\n  std::unique_lock<std::mutex> slock(ptc_lock_);"
+          ompl_terminate_probe = "bool ModelBasedPlanningContext::terminate()\n{\n  std::fprintf(stderr, \"[STAUBLI_OMPL_CONTEXT_TERMINATE] context=%p\\n\", static_cast<const void*>(this));\n  std::fflush(stderr);\n  std::unique_lock<std::mutex> slock(ptc_lock_);"
           if "STAUBLI_OMPL_CONTEXT_TERMINATE" not in ompl_context_source:
               if ompl_context_source.count(ompl_terminate_anchor) != 1:
                   raise SystemExit("Could not locate unique OMPL ModelBasedPlanningContext::terminate() anchor.")
