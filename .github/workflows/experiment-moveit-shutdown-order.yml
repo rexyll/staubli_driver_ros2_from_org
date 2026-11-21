@@ -731,14 +731,18 @@ jobs:
           # pointer evidence. This is a CI-only correction of the pinned upstream
           # SequenceService dispatch defect; product/upstream sources stay untouched.
           old_sequence_solve = "    traj_vec = command_list_manager_->solve(scene, context_->planning_pipeline_, req->request);"
-          new_sequence_solve = """    std::fprintf(stderr,
-                 "[STAUBLI_SEQUENCE_ROUTE] request=%s selected=%p default=%p received=%p\\n",
-                 req->request.items[0].req.pipeline_id.c_str(),
-                 static_cast<const void*>(planning_pipeline.get()),
-                 static_cast<const void*>(context_->planning_pipeline_.get()),
-                 static_cast<const void*>(planning_pipeline.get()));
-          std::fflush(stderr);
-          traj_vec = command_list_manager_->solve(scene, planning_pipeline, req->request);"""
+          new_sequence_solve = """    if (req->request.items[0].req.allowed_planning_time > 7.7319 &&
+                req->request.items[0].req.allowed_planning_time < 7.7321)
+            {
+              std::fprintf(stderr,
+                           "[STAUBLI_SEQUENCE_ROUTE] request=%s selected=%p default=%p received=%p\\n",
+                           req->request.items[0].req.pipeline_id.c_str(),
+                           static_cast<const void*>(planning_pipeline.get()),
+                           static_cast<const void*>(context_->planning_pipeline_.get()),
+                           static_cast<const void*>(planning_pipeline.get()));
+              std::fflush(stderr);
+            }
+            traj_vec = command_list_manager_->solve(scene, planning_pipeline, req->request);"""
           if sequence_source.count(old_sequence_solve) != 1:
               raise SystemExit("Expected one stock SequenceService CommandListManager pipeline argument.")
           sequence_source = sequence_source.replace(old_sequence_solve, new_sequence_solve, 1)
