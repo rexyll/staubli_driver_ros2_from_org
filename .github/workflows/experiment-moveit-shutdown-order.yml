@@ -118,6 +118,7 @@ jobs:
               raise SystemExit("Expected unique MoveItCpp main() owner for terminate-probe service.")
           terminate_service_patch = '''  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr staubli_terminate_probe_service;
           rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr staubli_cross_pipeline_service;
+          rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr staubli_reverse_cross_pipeline_service;
           rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr staubli_probe_status_service;
           rclcpp::CallbackGroup::SharedPtr staubli_probe_callback_group;
           const char* staubli_terminate_probe_env = std::getenv("STAUBLI_TERMINATE_PROBE");
@@ -364,6 +365,64 @@ jobs:
                                release_result.successful ? 1 : 0);
                   std::fflush(stderr);
                 }, rmw_qos_profile_services_default, staubli_probe_callback_group);
+            staubli_reverse_cross_pipeline_service = nh->create_service<std_srvs::srv::Trigger>(
+                "/staubli_test_reverse_cross_pipeline_terminate",
+                [moveit_cpp](const std_srvs::srv::Trigger::Request::SharedPtr& request,
+                             const std_srvs::srv::Trigger::Response::SharedPtr& response) {
+                  (void)request;
+                  const auto pipelines = moveit_cpp->getPlanningPipelines();
+                  const auto ompl = pipelines.find("ompl");
+                  const auto pilz = pipelines.find("pilz_industrial_motion_planner");
+                  const bool ompl_exists = ompl != pipelines.end() && ompl->second;
+                  const bool pilz_exists = pilz != pipelines.end() && pilz->second &&
+                                           !pilz->second->getPlannerPluginNames().empty();
+                  if (!ompl_exists || !pilz_exists)
+                  {
+                    response->success = false;
+                    response->message = "precondition failed: OMPL and Pilz pipelines required";
+                    return;
+                  }
+                  const auto ompl_pipeline = ompl->second;
+                  planning_interface::PlanningContextPtr target_context;
+                  planning_interface::StaubliSolveBarrierProbe* barrier = nullptr;
+                  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+                  while (std::chrono::steady_clock::now() < deadline)
+                  {
+                    target_context = ompl_pipeline->staubliTestLatestContext();
+                    barrier = target_context ?
+                        dynamic_cast<planning_interface::StaubliSolveBarrierProbe*>(target_context.get()) : nullptr;
+                    if (ompl_pipeline->isActive() && barrier && barrier->staubliSolveBarrierEntered())
+                      break;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                  }
+                  const bool ompl_active = ompl_pipeline->isActive();
+                  const bool solve_entered = barrier && barrier->staubliSolveBarrierEntered();
+                  if (!ompl_active || !solve_entered)
+                  {
+                    response->success = false;
+                    response->message = "OMPL request did not enter active in-flight barrier";
+                    return;
+                  }
+                  std::fprintf(stderr, "[STAUBLI_REVERSE_CROSS] B_CONTEXT_CREATED context=%p pipeline=%p\\n",
+                               static_cast<const void*>(target_context.get()),
+                               static_cast<const void*>(ompl_pipeline.get()));
+                  std::fflush(stderr);
+                  const bool wrapper_result = moveit_cpp->terminatePlanningPipeline("pilz_industrial_motion_planner");
+                  std::fprintf(stderr, "[STAUBLI_REVERSE_CROSS] A_WRAPPER_RETURN result=%d\\n",
+                               wrapper_result ? 1 : 0);
+                  std::fflush(stderr);
+                  const bool terminated = barrier->staubliContextTerminated();
+                  std::fprintf(stderr,
+                               "[STAUBLI_OMPL_INFLIGHT] TERMINATE_OBSERVED context=%p terminated=%d solve_done=0\\n",
+                               static_cast<const void*>(target_context.get()), terminated ? 1 : 0);
+                  barrier->releaseStaubliSolveBarrier();
+                  std::fprintf(stderr, "[STAUBLI_REVERSE_CROSS] RELEASE context=%p\\n",
+                               static_cast<const void*>(target_context.get()));
+                  std::fflush(stderr);
+                  response->success = ompl_active && pilz_exists && wrapper_result && solve_entered && !terminated;
+                  response->message = "ompl_active=1 pilz_exists=1 wrapper=" + std::to_string(wrapper_result) +
+                                      " solve_entered=1 terminated=" + std::to_string(terminated);
+                }, rmw_qos_profile_services_default, staubli_probe_callback_group);
           }
           '''
           source = source.replace(
@@ -395,6 +454,7 @@ jobs:
               """    rclcpp::shutdown();
                   staubli_terminate_probe_service.reset();
                   staubli_cross_pipeline_service.reset();
+                  staubli_reverse_cross_pipeline_service.reset();
                   staubli_probe_status_service.reset();
                   moveit_cpp.reset();
                   nh.reset();""",
@@ -999,6 +1059,11 @@ jobs:
                 staubli_terminate_probe_enabled && staubli_cross_pipeline_env != nullptr &&
                 staubli_cross_pipeline_env[0] == '1' && staubli_cross_pipeline_env[1] == '\\0' &&
                 std::fabs(req.allowed_planning_time - 7.733) < 1e-9;
+            const char* staubli_reverse_cross_env = std::getenv("STAUBLI_REVERSE_CROSS_PIPELINE_PROBE");
+            const bool staubli_probe_reverse_cross =
+                staubli_terminate_probe_enabled && staubli_reverse_cross_env != nullptr &&
+                staubli_reverse_cross_env[0] == '1' && staubli_reverse_cross_env[1] == '\\0' &&
+                std::fabs(req.allowed_planning_time - 7.737) < 1e-9;
 
             static std::mutex staubli_probe_mutex;
             static std::condition_variable staubli_probe_cv;
@@ -1255,6 +1320,15 @@ jobs:
               auto* barrier = dynamic_cast<planning_interface::StaubliSolveBarrierProbe*>(context.get());
               if (barrier)
                 barrier->armStaubliSolveBarrier();
+            }
+            if (staubli_probe_reverse_cross)
+            {
+              auto* barrier = dynamic_cast<planning_interface::StaubliSolveBarrierProbe*>(context.get());
+              if (!barrier)
+                throw std::runtime_error("OMPL context does not expose reverse CI solve barrier");
+              barrier->armStaubliSolveBarrier();
+              std::fprintf(stderr, "[STAUBLI_REVERSE_CROSS] B_OMPL_ARMED context=%p\\n", static_cast<const void*>(context.get()));
+              std::fflush(stderr);
             }
             // Run planner
           """,
@@ -1742,12 +1816,95 @@ jobs:
                   raise SystemExit("Could not locate unique OMPL ModelBasedPlanningContext::terminate() anchor.")
               ompl_context_source = ompl_context_source.replace(ompl_terminate_anchor, ompl_terminate_probe, 1)
           ompl_context_path.write_text(ompl_context_source)
+
+          # Add the same deterministic in-flight barrier to a real OMPL planning context.
+          ompl_header_path = Path(
+              "/tmp/moveit_ws/src/moveit2/moveit_planners/ompl/ompl_interface/include/moveit/ompl_interface/model_based_planning_context.hpp"
+          )
+          ompl_header_source = ompl_header_path.read_text()
+          if "#include <atomic>" not in ompl_header_source:
+              include_anchor = "#include <moveit/ompl_interface/parameterization/model_based_state_space.hpp>\n"
+              if ompl_header_source.count(include_anchor) != 1:
+                  raise SystemExit("Could not locate OMPL header include anchor for atomic fields.")
+              ompl_header_source = ompl_header_source.replace(include_anchor, "#include <atomic>\n" + include_anchor, 1)
+          ompl_class_anchor = "class ModelBasedPlanningContext : public planning_interface::PlanningContext"
+          if ompl_header_source.count(ompl_class_anchor) != 1:
+              raise SystemExit("Expected one OMPL ModelBasedPlanningContext declaration.")
+          if "public planning_interface::StaubliSolveBarrierProbe" not in ompl_header_source:
+              ompl_header_source = ompl_header_source.replace(
+                  ompl_class_anchor,
+                  "class ModelBasedPlanningContext : public planning_interface::PlanningContext,\n"
+                  "                                   public planning_interface::StaubliSolveBarrierProbe", 1
+              )
+          ompl_methods_anchor = "  bool terminate() override;\n"
+          ompl_methods = """  bool terminate() override;
+            void armStaubliSolveBarrier() override
+            {
+              staubli_solve_barrier_entered_.store(false);
+              staubli_solve_barrier_release_.store(false);
+              staubli_solve_barrier_armed_.store(true);
+              staubli_context_terminated_.store(false);
+            }
+            bool staubliSolveBarrierEntered() const override { return staubli_solve_barrier_entered_.load(); }
+            void releaseStaubliSolveBarrier() override { staubli_solve_barrier_release_.store(true); }
+            bool staubliContextTerminated() const override { return staubli_context_terminated_.load(); }
+            std::atomic_bool staubli_solve_barrier_armed_{ false };
+            std::atomic_bool staubli_solve_barrier_entered_{ false };
+            std::atomic_bool staubli_solve_barrier_release_{ false };
+            std::atomic_bool staubli_context_terminated_{ false };
+          """
+          if "armStaubliSolveBarrier() override" not in ompl_header_source:
+              if ompl_header_source.count(ompl_methods_anchor) != 1:
+                  raise SystemExit("Could not locate OMPL terminate declaration for barrier methods.")
+              ompl_header_source = ompl_header_source.replace(ompl_methods_anchor, ompl_methods, 1)
+          ompl_header_path.write_text(ompl_header_source)
+
+          if "#include <chrono>" not in ompl_context_source:
+              if "#include <cstdio>" not in ompl_context_source:
+                  raise SystemExit("Expected cstdio include from OMPL terminate probe.")
+              ompl_context_source = ompl_context_source.replace(
+                  "#include <cstdio>", "#include <cstdio>\n#include <chrono>\n#include <thread>", 1
+              )
+          ompl_solve_anchor = """const moveit_msgs::msg::MoveItErrorCodes ModelBasedPlanningContext::solve(double timeout,
+                                                                                                      unsigned int count)
+          {"""
+          ompl_solve_probe = """const moveit_msgs::msg::MoveItErrorCodes ModelBasedPlanningContext::solve(double timeout,
+                                                                                                      unsigned int count)
+          {
+            if (staubli_solve_barrier_armed_.exchange(false))
+            {
+              staubli_solve_barrier_entered_.store(true);
+              std::fprintf(stderr, "[STAUBLI_OMPL_INFLIGHT] SOLVE_ENTERED context=%p\\n", static_cast<const void*>(this));
+              std::fflush(stderr);
+              const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+              while (!staubli_solve_barrier_release_.load() && std::chrono::steady_clock::now() < deadline)
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }"""
+          if "STAUBLI_OMPL_INFLIGHT] SOLVE_ENTERED" not in ompl_context_source:
+              if ompl_context_source.count(ompl_solve_anchor) != 1:
+                  raise SystemExit("Could not locate unique OMPL solve(timeout,count) entry.")
+              ompl_context_source = ompl_context_source.replace(ompl_solve_anchor, ompl_solve_probe, 1)
+          ompl_terminate_anchor = "bool ModelBasedPlanningContext::terminate()\n{\n"
+          if "staubli_context_terminated_.store(true)" not in ompl_context_source:
+              if ompl_context_source.count(ompl_terminate_anchor) != 1:
+                  raise SystemExit("Could not locate unique OMPL terminate entry.")
+              ompl_context_source = ompl_context_source.replace(
+                  ompl_terminate_anchor,
+                  "bool ModelBasedPlanningContext::terminate()\n{\n"
+                  "  staubli_context_terminated_.store(true);\n"
+                  "  std::fprintf(stderr, \"[STAUBLI_OMPL_CONTEXT_TERMINATE] context=%p\\\\n\", static_cast<const void*>(this));\n"
+                  "  std::fflush(stderr);\n",
+                  1
+              )
+          ompl_context_path.write_text(ompl_context_source)
           if not (
               "class StaubliSolveBarrierProbe" in planning_interface_source
               and "public planning_interface::StaubliSolveBarrierProbe" in pilz_context_source
               and "armStaubliSolveBarrier" in pilz_context_source
               and "staubli_solve_barrier_entered_" in pilz_context_source
               and "STAUBLI_OMPL_CONTEXT_TERMINATE" in ompl_context_source
+              and "public planning_interface::StaubliSolveBarrierProbe" in ompl_header_source
+              and "STAUBLI_OMPL_INFLIGHT] SOLVE_ENTERED" in ompl_context_source
           ):
               raise SystemExit("Pilz in-flight solve barrier overlay validation failed.")
 
@@ -2140,6 +2297,54 @@ jobs:
                   print("[STAUBLI_CROSS_PIPELINE_CLIENT] PASS active_ompl=1 pilz_request_active=1 pilz_inflight=SUCCESS target_unterminated=1 control=SUCCESS")
           '''
 
+
+          reverse_cross_pipeline_method = '''
+              def test_y_active_pilz_terminate_does_not_mark_live_ompl_context(self):
+                  """Pilz termination must not terminate a live OMPL context."""
+                  plan_client = self.node.create_client(GetMotionPlan, "/plan_kinematic_path")
+                  terminate_client = self.node.create_client(Trigger, "/staubli_test_reverse_cross_pipeline_terminate")
+                  self.assertTrue(plan_client.wait_for_service(timeout_sec=120.0))
+                  self.assertTrue(terminate_client.wait_for_service(timeout_sec=120.0))
+                  request = GetMotionPlan.Request()
+                  request.motion_plan_request.group_name = "arm"
+                  request.motion_plan_request.pipeline_id = "ompl"
+                  request.motion_plan_request.allowed_planning_time = 7.737
+                  request.motion_plan_request.num_planning_attempts = 2
+                  request.motion_plan_request.start_state.is_diff = True
+                  request.motion_plan_request.max_velocity_scaling_factor = 0.5
+                  request.motion_plan_request.max_acceleration_scaling_factor = 0.5
+                  constraints = Constraints()
+                  target_positions = (0.11, 0.21, 0.31, 0.41, 0.51, 0.61)
+                  for index, position in enumerate(target_positions, start=1):
+                      joint = JointConstraint()
+                      joint.joint_name = f"joint_{index}"
+                      joint.position = position
+                      joint.tolerance_above = 0.05
+                      joint.tolerance_below = 0.05
+                      joint.weight = 1.0
+                      constraints.joint_constraints.append(joint)
+                  request.motion_plan_request.goal_constraints.append(constraints)
+                  plan_future = plan_client.call_async(request)
+                  time.sleep(0.25)
+                  terminate_future = terminate_client.call_async(Trigger.Request())
+                  rclpy.spin_until_future_complete(self.node, terminate_future, timeout_sec=30.0)
+                  self.assertTrue(terminate_future.done(), "Reverse pipeline terminate service timed out")
+                  terminate_response = terminate_future.result()
+                  self.assertIsNotNone(terminate_response)
+                  self.assertTrue(terminate_response.success, terminate_response.message)
+                  self.assertIn("ompl_active=1", terminate_response.message)
+                  self.assertIn("pilz_exists=1", terminate_response.message)
+                  self.assertIn("wrapper=1", terminate_response.message)
+                  self.assertIn("solve_entered=1", terminate_response.message)
+                  self.assertIn("terminated=0", terminate_response.message)
+                  rclpy.spin_until_future_complete(self.node, plan_future, timeout_sec=120.0)
+                  self.assertTrue(plan_future.done(), "OMPL request did not resume after Pilz-only terminate")
+                  plan_response = plan_future.result()
+                  self.assertEqual(plan_response.motion_plan_response.error_code.val, MoveItErrorCodes.SUCCESS)
+                  self.assertTrue(plan_response.motion_plan_response.trajectory.joint_trajectory.points)
+                  print("[STAUBLI_REVERSE_CROSS_PIPELINE_CLIENT] PASS pilz_terminate=1 ompl_inflight=SUCCESS target_unterminated=1")
+          '''
+
           method = '''
               def test_z_move_group_executes_joint_goal_on_mock_controller(self):
                   """Run a real MoveGroup plan-and-execute request on mock hardware."""
@@ -2194,7 +2399,7 @@ jobs:
 
           source = source.replace(
               shutdown_anchor,
-              "\n\n" + multi_token_method + "\n" + cross_pipeline_method + "\n" + concurrency_method + "\n" + method + shutdown_anchor,
+              "\n\n" + multi_token_method + "\n" + cross_pipeline_method + "\n" + reverse_cross_pipeline_method + "\n" + concurrency_method + "\n" + method + shutdown_anchor,
               1,
           )
           test_path.write_text(source)
@@ -2216,6 +2421,7 @@ jobs:
           export STAUBLI_ACTIVE_PROBE=1
           export STAUBLI_TERMINATE_PROBE=1
           export STAUBLI_CROSS_PIPELINE_PROBE=1
+          export STAUBLI_REVERSE_CROSS_PIPELINE_PROBE=1
           export STAUBLI_FORCE_DEFAULT_PILZ=1
           # Capture DSO unload events, then inspect each CallbackGroup weak ServiceBase
           # control block at the reproducible pnode_ teardown SIGSEGV.
@@ -2602,6 +2808,44 @@ jobs:
           inflight_terminated = [line for line in lines if "[STAUBLI_PILZ_INFLIGHT] TERMINATE_OBSERVED " in line]
           inflight_released = [line for line in lines if "[STAUBLI_PILZ_INFLIGHT] SOLVE_RELEASED " in line]
           cross_client = [line for line in lines if "[STAUBLI_CROSS_PIPELINE_CLIENT] PASS " in line]
+          reverse_armed = [line for line in lines if "[STAUBLI_REVERSE_CROSS] B_OMPL_ARMED " in line]
+          reverse_context = [line for line in lines if "[STAUBLI_REVERSE_CROSS] B_CONTEXT_CREATED " in line]
+          reverse_wrapper = [line for line in lines if "[STAUBLI_REVERSE_CROSS] A_WRAPPER_RETURN " in line]
+          reverse_observed = [line for line in lines if "[STAUBLI_OMPL_INFLIGHT] TERMINATE_OBSERVED " in line]
+          reverse_released = [line for line in lines if "[STAUBLI_REVERSE_CROSS] RELEASE " in line]
+          reverse_client = [line for line in lines if "[STAUBLI_REVERSE_CROSS_PIPELINE_CLIENT] PASS " in line]
+          if not all(len(items) == 1 for items in (
+              reverse_armed, reverse_context, reverse_wrapper, reverse_observed, reverse_released, reverse_client
+          )):
+              raise SystemExit(
+                  "Reverse Pilz->OMPL isolation markers missing/duplicated: "
+                  f"armed={len(reverse_armed)} context={len(reverse_context)} wrapper={len(reverse_wrapper)} "
+                  f"observed={len(reverse_observed)} released={len(reverse_released)} client={len(reverse_client)}"
+              )
+          reverse_ptrs = [
+              re.search(r"context=(0x[0-9a-fA-F]+)", line)
+              for line in (reverse_armed[0], reverse_context[0], reverse_observed[0], reverse_released[0])
+          ]
+          if any(ptr is None for ptr in reverse_ptrs) or len({ptr.group(1) for ptr in reverse_ptrs}) != 1:
+              raise SystemExit("Reverse OMPL context pointer mismatch across arm/create/observe/release.")
+          if not (
+              "result=1" in reverse_wrapper[0]
+              and "terminated=0" in reverse_observed[0]
+              and "solve_done=0" in reverse_observed[0]
+              and "pilz_terminate=1" in reverse_client[0]
+              and "ompl_inflight=SUCCESS" in reverse_client[0]
+              and "target_unterminated=1" in reverse_client[0]
+          ):
+              raise SystemExit(
+                  "Reverse pipeline isolation assertion failed: "
+                  f"wrapper={reverse_wrapper}, observed={reverse_observed}, client={reverse_client}"
+              )
+          reverse_order = [
+              lines.index(reverse_armed[0]), lines.index(reverse_context[0]), lines.index(reverse_wrapper[0]),
+              lines.index(reverse_observed[0]), lines.index(reverse_released[0]), lines.index(reverse_client[0])
+          ]
+          if reverse_order != sorted(reverse_order):
+              raise SystemExit(f"Reverse pipeline isolation event order invalid: {reverse_order}")
           cross_release = [line for line in lines if "[STAUBLI_CROSS_PIPELINE] RELEASE signal=1" in line]
           pilz_terminate_calls = [line for line in lines if "[STAUBLI_PILZ_TERMINATE] " in line]
           if not all(len(items) == 1 for items in (
