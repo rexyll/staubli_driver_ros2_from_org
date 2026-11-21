@@ -2705,14 +2705,20 @@ jobs:
               match.group(1) for line in multi_held
               if (match := re.search(r"pipeline=(0x[0-9a-fA-F]+)", line))
           }
+          multi_wrapper_index = multi_wrapper_indices[0]
+          multi_terminate_index = multi_terminate_events[0][0]
+          multi_release_index = lines.index(multi_release_signal[0])
+          multi_client_index = lines.index(multi_client_pass[0])
           multi_terminate_contexts = [
-              match.group(1) for line in lines
-              if "[STAUBLI_OMPL_CONTEXT_TERMINATE] " in line
+              match.group(1) for index, line in enumerate(lines)
+              if multi_terminate_index < index < multi_wrapper_index
+              and "[STAUBLI_OMPL_CONTEXT_TERMINATE] " in line
               and (match := re.search(r"context=(0x[0-9a-fA-F]+)", line))
           ]
           multi_cancel_tokens = [
-              match.group(1) for line in lines
-              if "[STAUBLI_REQUEST_TOKEN] CANCEL_REQUESTED " in line
+              match.group(1) for index, line in enumerate(lines)
+              if multi_terminate_index < index < multi_wrapper_index
+              and "[STAUBLI_REQUEST_TOKEN] CANCEL_REQUESTED " in line
               and "accepted=1" in line
               and (match := re.search(r"token=(0x[0-9a-fA-F]+)", line))
               and match.group(1) in multi_tokens
@@ -2722,10 +2728,11 @@ jobs:
                   token_match.group(1),
                   int(code_match.group(1)),
               )
-              for line in lines
-              if "[STAUBLI_MULTI_TOKEN] CANCEL_OBSERVED " in line
+              for index, line in enumerate(lines)
+              if multi_release_index < index < multi_client_index
+              and "[STAUBLI_MULTI_TOKEN] CANCEL_OBSERVED " in line
               and (token_match := re.search(r"token=(0x[0-9a-fA-F]+)", line))
-              and (code_match := re.search(r"code=(-?\d+)", line))
+              and (code_match := re.search(r"code=(-?\\d+)", line))
           ]
           multi_client_internal = [
               line for line in lines
