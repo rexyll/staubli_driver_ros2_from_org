@@ -183,7 +183,9 @@ jobs:
                   bool multi_b_held = false;
                   nh->get_parameter("staubli_test_multi_a_held", multi_a_held);
                   nh->get_parameter("staubli_test_multi_b_held", multi_b_held);
-                  const bool multi_token_scenario = multi_a_held && multi_b_held;
+                  const bool multi_token_scenario =
+                      multi_a_held && multi_b_held && pipeline != pipelines.end() && pipeline->second &&
+                      pipeline->second->staubliTestActiveRequestCount() == 2;
                   const bool wrapper_result = moveit_cpp->terminatePlanningPipeline("ompl");
                   if (multi_token_scenario)
                     std::fprintf(stderr, "[STAUBLI_MULTI_TOKEN] WRAPPER_RETURN active_before=%d result=%d\\n",
@@ -806,6 +808,7 @@ jobs:
                   "\nprivate:\n",
                   "\n  // CI-only inspection hook for the request-ownership regression.\n"
                   "  planning_interface::PlanningContextPtr staubliTestLatestContext() const;\n"
+                  "  size_t staubliTestActiveRequestCount() const;\n"
                   "  bool staubliTestRequestTokenLifecycle() const;\n"
                   "\nprivate:\n",
                   1
@@ -1350,6 +1353,12 @@ jobs:
             active_ = !active_requests_.empty();
           }
 
+          size_t PlanningPipeline::staubliTestActiveRequestCount() const
+          {
+            std::lock_guard<std::mutex> lock(active_requests_mutex_);
+            return active_requests_.size();
+          }
+
           planning_interface::PlanningContextPtr PlanningPipeline::staubliTestLatestContext() const
           {
             std::lock_guard<std::mutex> lock(active_requests_mutex_);
@@ -1580,6 +1589,7 @@ jobs:
               and "active_requests_.empty()" in pipeline_source
               and "planner_pair.second->terminate()" not in pipeline_source
               and "request_token->isCancelled()" in pipeline_source
+              and "staubliTestActiveRequestCount() const" in pipeline_header
           ):
               raise SystemExit("Pipeline-owned request cancellation overlay validation failed.")
           print("Applied pipeline-owned request cancellation tokens and environment-gated concurrency probes to temporary MoveIt overlay.")
