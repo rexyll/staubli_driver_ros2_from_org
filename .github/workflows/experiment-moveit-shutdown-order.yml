@@ -1950,7 +1950,7 @@ jobs:
                   self.assertTrue(idle_future.done(), "Multi-token pipeline idle query timed out")
                   self.assertIn("ompl_active=0", idle_future.result().message)
                   self.assertIn("pilz_active=0", idle_future.result().message)
-                  print("[STAUBLI_MULTI_TOKEN_CLIENT] PASS requests=2 tokens=2 contexts=2 terminate_dispatches=2 internal_code=PLANNING_FAILED outer_plan=FAILURE outer_sequence=FAILURE ompl_active=0 pilz_active=0")
+                  print("[STAUBLI_MULTI_TOKEN_CLIENT] PASS requests=2 tokens=2 contexts=2 token_cancellations=2 pre_solve_context_terminates=0 internal_code=PLANNING_FAILED outer_plan=FAILURE outer_sequence=FAILURE ompl_active=0 pilz_active=0")
           '''
 
           concurrency_method = '''
@@ -2745,10 +2745,15 @@ jobs:
               and "outer_plan=FAILURE" in line
               and "outer_sequence=FAILURE" in line
           ]
+          # Both requests are deliberately held after PlanningContext attachment but
+          # before context->solve(). At this stage terminatePlanningPipeline must cancel
+          # both request tokens; the request threads then observe cancellation and return
+          # before entering OMPL. Calling ModelBasedPlanningContext::terminate() here is
+          # neither expected nor a valid assertion for a solve that never started.
           if (
               len(held_roles) != 2 or {match.group(1) for match in held_roles if match} != {"a", "b"}
               or len(multi_contexts) != 2 or len(multi_tokens) != 2 or len(multi_pipeline_ptrs) != 1
-              or len(multi_terminate_contexts) != 2 or set(multi_terminate_contexts) != multi_contexts
+              or len(multi_terminate_contexts) != 0
               or len(multi_cancel_tokens) != 2 or set(multi_cancel_tokens) != multi_tokens
               or len(multi_cancel_observed) != 2
               or {token for token, _ in multi_cancel_observed} != multi_tokens
@@ -2756,9 +2761,10 @@ jobs:
               or len(multi_client_internal) != 1
           ):
               raise SystemExit(
-                  "Two simultaneous OMPL request tokens did not each receive exactly one context terminate and cancellation: "
+                  "Two pre-solve OMPL requests did not each observe exactly one accepted token cancellation "
+                  "without entering OMPL context termination: "
                   f"roles={held_roles}, contexts={multi_contexts}, tokens={multi_tokens}, "
-                  f"pipelines={multi_pipeline_ptrs}, context_terminates={multi_terminate_contexts}, "
+                  f"pipelines={multi_pipeline_ptrs}, unexpected_context_terminates={multi_terminate_contexts}, "
                   f"token_cancels={multi_cancel_tokens}, token_observed={multi_cancel_observed}"
               )
           cross_pipeline_ptr = re.search(r"pipeline=(0x[0-9a-fA-F]+)", cross_held[0])
