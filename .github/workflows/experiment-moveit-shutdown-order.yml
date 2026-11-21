@@ -932,7 +932,7 @@ jobs:
           active_anchor = "  // Set planning pipeline active\n  active_ = true;"
           if pipeline_source.count(active_anchor) != 1:
               raise SystemExit("Expected one PlanningPipeline active=true anchor.")
-          probe_code = """  auto request_token = std::make_shared<RequestToken>();
+          request_setup = """  auto request_token = std::make_shared<RequestToken>();
             registerActiveRequest(request_token);
             RequestGuard request_guard{ this, request_token };
             auto finalize_request = [&](bool success) {
@@ -943,8 +943,8 @@ jobs:
               }
               return success;
             };
-
-            // CI-only deterministic probe. Disabled unless explicitly enabled by the test job.
+          """
+          probe_code = """            // CI-only deterministic probe. Disabled unless explicitly enabled by the test job.
             const char* staubli_probe_env = std::getenv("STAUBLI_ACTIVE_PROBE");
             const bool staubli_probe_enabled =
                 staubli_probe_env != nullptr && staubli_probe_env[0] == '1' && staubli_probe_env[1] == '\\0';
@@ -1084,7 +1084,10 @@ jobs:
                 std::fflush(stderr);
               }
             }"""
-          pipeline_source = pipeline_source.replace(active_anchor, active_anchor + "\n" + probe_code, 1)
+          # Register before publishing active=true so terminate cannot miss an entering request.
+          pipeline_source = pipeline_source.replace(
+              active_anchor, request_setup + "\n" + active_anchor + "\n" + probe_code, 1
+          )
           exit_anchor = """  // Set planning pipeline to inactive
             active_ = false;
             return static_cast<bool>(res);"""
@@ -1480,6 +1483,8 @@ jobs:
           generate_body = pipeline_source[generate_start:terminate_start]
           if "auto finalize_request = [&](bool success)" not in generate_body:
               raise SystemExit("Request completion finalizer was not injected into generatePlan.")
+          if generate_body.index("registerActiveRequest(request_token);") > generate_body.index("active_ = true;"):
+              raise SystemExit("Request token registration must precede the first active=true publication.")
           generate_body = generate_body.replace("return false;", "return finalize_request(false);")
           generate_body = generate_body.replace(
               "return static_cast<bool>(res);", "return finalize_request(static_cast<bool>(res));"
