@@ -1846,13 +1846,85 @@ jobs:
           method_name = "test_z_move_group_executes_joint_goal_on_mock_controller"
           concurrency_method_name = "test_y_same_ompl_pipeline_plan_and_sequence_overlap"
           cross_pipeline_method_name = "test_x_active_ompl_terminate_marks_live_pilz_context"
+          multi_token_method_name = "test_w_same_ompl_two_active_tokens_cancel_both"
           if (
               source.count(shutdown_anchor) != 1
               or method_name in source
               or concurrency_method_name in source
               or cross_pipeline_method_name in source
+              or multi_token_method_name in source
           ):
               raise SystemExit("Unexpected launch-test structure; refusing duplicate test injection.")
+
+          multi_token_method = '''
+              def test_w_same_ompl_two_active_tokens_cancel_both(self):
+                  """Cancel two simultaneously active request tokens in one OMPL pipeline."""
+                  plan_client = self.node.create_client(GetMotionPlan, "/plan_kinematic_path")
+                  status_client = self.node.create_client(Trigger, "/staubli_test_probe_status")
+                  terminate_client = self.node.create_client(Trigger, "/staubli_test_terminate_ompl")
+                  self.assertTrue(plan_client.wait_for_service(timeout_sec=120.0))
+                  self.assertTrue(status_client.wait_for_service(timeout_sec=120.0))
+                  self.assertTrue(terminate_client.wait_for_service(timeout_sec=120.0))
+
+                  def make_request(allowed_time):
+                      request = GetMotionPlan.Request()
+                      request.motion_plan_request.group_name = "arm"
+                      request.motion_plan_request.pipeline_id = "ompl"
+                      request.motion_plan_request.allowed_planning_time = allowed_time
+                      request.motion_plan_request.num_planning_attempts = 1
+                      request.motion_plan_request.start_state.is_diff = True
+                      request.motion_plan_request.max_velocity_scaling_factor = 0.5
+                      request.motion_plan_request.max_acceleration_scaling_factor = 0.5
+                      constraints = Constraints()
+                      target_positions = (0.11, 0.21, 0.31, 0.41, 0.51, 0.61)
+                      for index, position in enumerate(target_positions, start=1):
+                          joint = JointConstraint()
+                          joint.joint_name = f"joint_{index}"
+                          joint.position = position
+                          joint.tolerance_above = 0.05
+                          joint.tolerance_below = 0.05
+                          joint.weight = 1.0
+                          constraints.joint_constraints.append(joint)
+                      request.motion_plan_request.goal_constraints.append(constraints)
+                      return request
+
+                  future_a = plan_client.call_async(make_request(7.735))
+                  future_b = plan_client.call_async(make_request(7.736))
+                  both_held = False
+                  for _ in range(300):
+                      status_future = status_client.call_async(Trigger.Request())
+                      rclpy.spin_until_future_complete(self.node, status_future, timeout_sec=2.0)
+                      self.assertTrue(status_future.done(), "Multi-token status query timed out")
+                      message = status_future.result().message
+                      if "multi_a_held=1" in message and "multi_b_held=1" in message:
+                          both_held = True
+                          break
+                      time.sleep(0.05)
+                  self.assertTrue(both_held, "Both independent OMPL requests did not reach their held contexts")
+
+                  terminate_future = terminate_client.call_async(Trigger.Request())
+                  rclpy.spin_until_future_complete(self.node, terminate_future, timeout_sec=30.0)
+                  self.assertTrue(terminate_future.done(), "Multi-token terminate wrapper timed out")
+                  terminate_response = terminate_future.result()
+                  self.assertIsNotNone(terminate_response)
+                  self.assertTrue(terminate_response.success, "Multi-token terminate wrapper/lifecycle probe failed")
+
+                  rclpy.spin_until_future_complete(self.node, future_a, timeout_sec=120.0)
+                  rclpy.spin_until_future_complete(self.node, future_b, timeout_sec=120.0)
+                  self.assertTrue(future_a.done(), "First active OMPL request did not finish after cancellation")
+                  self.assertTrue(future_b.done(), "Second active OMPL request did not finish after cancellation")
+                  response_a = future_a.result()
+                  response_b = future_b.result()
+                  self.assertEqual(response_a.motion_plan_response.error_code.val, MoveItErrorCodes.FAILURE)
+                  self.assertEqual(response_b.motion_plan_response.error_code.val, MoveItErrorCodes.FAILURE)
+
+                  idle_future = status_client.call_async(Trigger.Request())
+                  rclpy.spin_until_future_complete(self.node, idle_future, timeout_sec=5.0)
+                  self.assertTrue(idle_future.done(), "Multi-token pipeline idle query timed out")
+                  self.assertIn("ompl_active=0", idle_future.result().message)
+                  self.assertIn("pilz_active=0", idle_future.result().message)
+                  print("[STAUBLI_MULTI_TOKEN_CLIENT] PASS requests=2 tokens=2 contexts=2 terminate_dispatches=2 ompl_active=0 pilz_active=0")
+          '''
 
           concurrency_method = '''
               def test_y_same_ompl_pipeline_plan_and_sequence_overlap(self):
@@ -2095,7 +2167,7 @@ jobs:
 
           source = source.replace(
               shutdown_anchor,
-              "\n\n" + cross_pipeline_method + "\n" + concurrency_method + "\n" + method + shutdown_anchor,
+              "\n\n" + multi_token_method + "\n" + cross_pipeline_method + "\n" + concurrency_method + "\n" + method + shutdown_anchor,
               1,
           )
           test_path.write_text(source)
@@ -2387,18 +2459,18 @@ jobs:
           launch_tests = sum("Ran 1 test in" in line for line in lines)
           if launch_tests != 1:
               raise SystemExit(f"Expected one launch test execution, observed {launch_tests}")
-          concurrent_suites = sum("Ran 4 tests in" in line for line in lines)
+          concurrent_suites = sum("Ran 5 tests in" in line for line in lines)
           if concurrent_suites != 1:
-              raise SystemExit(f"Expected the four-test pre-shutdown launch suite, observed {concurrent_suites}")
+              raise SystemExit(f"Expected the five-test pre-shutdown launch suite, observed {concurrent_suites}")
           # colcon test-result writes the aggregate summary to result_log, not output_log.
-          # The new same-pipeline unittest adds one xUnit test case to the
-          # existing seven-test package summary. Fail closed if the count drifts.
+          # The two-active-token unittest adds one xUnit test case to the prior
+          # nine-test package summary. Fail closed if the count drifts.
           passing_summaries = sum(
-              "Summary: 9 tests, 0 errors, 0 failures, 0 skipped" in line
+              "Summary: 10 tests, 0 errors, 0 failures, 0 skipped" in line
               for line in result_lines
           )
           if passing_summaries != 1:
-              raise SystemExit(f"Expected one clean 9-test summary, observed {passing_summaries}")
+              raise SystemExit(f"Expected one clean 10-test summary, observed {passing_summaries}")
           cancel_requested = [line for line in lines if "[STAUBLI_REQUEST_TOKEN] CANCEL_REQUESTED " in line]
           cancel_observed = [line for line in lines if "[STAUBLI_REQUEST_TOKEN] CANCEL_OBSERVED " in line]
           if len(cancel_requested) < 2 or len(cancel_observed) < 2:
@@ -2476,6 +2548,12 @@ jobs:
           client_pass = [line for line in lines if "[STAUBLI_ACTIVE_PROBE_CLIENT] PASS plan=SUCCESS sequence=FAILURE terminate=wrapper_called" in line]
           if len(client_pass) != 1:
               raise SystemExit(f"Expected one successful concurrent service-client + terminate-wrapper assertion, observed {len(client_pass)}")
+          multi_client_pass = [
+              line for line in lines
+              if "[STAUBLI_MULTI_TOKEN_CLIENT] PASS requests=2 tokens=2 contexts=2 terminate_dispatches=2" in line
+          ]
+          if len(multi_client_pass) != 1:
+              raise SystemExit(f"Expected one successful two-active-token client marker, observed {len(multi_client_pass)}")
           idle_markers = [line for line in lines if "[STAUBLI_PIPELINE_IDLE] " in line]
           if len(idle_markers) != 2 or any(
               "ompl_active=0" not in line or "pilz_active=0" not in line for line in idle_markers
