@@ -2577,7 +2577,7 @@ jobs:
               raise SystemExit(f"Expected one successful concurrent service-client + terminate-wrapper assertion, observed {len(client_pass)}")
           multi_client_pass = [
               line for line in lines
-              if "[STAUBLI_MULTI_TOKEN_CLIENT] PASS requests=2 tokens=2 contexts=2 terminate_dispatches=2" in line
+              if "[STAUBLI_MULTI_TOKEN_CLIENT] PASS requests=2 tokens=2 contexts=2 token_cancellations=2 pre_solve_context_terminates=0" in line
           ]
           if len(multi_client_pass) != 1:
               raise SystemExit(f"Expected one successful two-active-token client marker, observed {len(multi_client_pass)}")
