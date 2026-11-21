@@ -2712,7 +2712,18 @@ jobs:
           multi_wrapper_index = multi_wrapper_indices[0]
           multi_terminate_index = multi_terminate_events[0][0]
           multi_release_index = lines.index(multi_release_signal[0])
-          multi_client_index = lines.index(multi_client_pass[0])
+          # The service response/client PASS marker can be printed before the
+          # second request worker flushes its cancellation-observed log. Bound
+          # the observation window by the next independent Pilz-inflight phase,
+          # not by the client marker's output order.
+          pilz_inflight_start_indices = [
+              i for i, line in enumerate(lines)
+              if "[STAUBLI_PILZ_INFLIGHT] SOLVE_ENTERED " in line
+              and i > multi_release_index
+          ]
+          if not pilz_inflight_start_indices:
+              raise SystemExit("Pilz in-flight phase did not start after the multi-token release.")
+          multi_next_phase_index = pilz_inflight_start_indices[0]
           multi_terminate_contexts = [
               match.group(1) for index, line in enumerate(lines)
               if multi_terminate_index < index < multi_wrapper_index
@@ -2733,7 +2744,7 @@ jobs:
                   int(code_match.group(1)),
               )
               for index, line in enumerate(lines)
-              if multi_release_index < index < multi_client_index
+              if multi_release_index < index < multi_next_phase_index
               and "[STAUBLI_MULTI_TOKEN] CANCEL_OBSERVED " in line
               and (token_match := re.search(r"token=(0x[0-9a-fA-F]+)", line))
               and (code_match := re.search(r"code=(-?\d+)", line))
