@@ -1865,25 +1865,26 @@ jobs:
               ompl_context_source = ompl_context_source.replace(
                   "#include <cstdio>", "#include <cstdio>\n#include <chrono>\n#include <thread>", 1
               )
-          ompl_solve_anchor = """const moveit_msgs::msg::MoveItErrorCodes ModelBasedPlanningContext::solve(double timeout,
-                                                                                                      unsigned int count)
-          {"""
-          ompl_solve_probe = """const moveit_msgs::msg::MoveItErrorCodes ModelBasedPlanningContext::solve(double timeout,
-                                                                                                      unsigned int count)
-          {
+          if "STAUBLI_OMPL_INFLIGHT] SOLVE_ENTERED" not in ompl_context_source:
+              solve_signature = "const moveit_msgs::msg::MoveItErrorCodes ModelBasedPlanningContext::solve(double timeout,"
+              solve_start = ompl_context_source.find(solve_signature)
+              solve_brace = ompl_context_source.find("{", solve_start) if solve_start >= 0 else -1
+              if solve_start < 0 or solve_brace < 0:
+                  raise SystemExit("Could not locate OMPL solve(timeout,count) body.")
+              ompl_barrier_code = """
             if (staubli_solve_barrier_armed_.exchange(false))
             {
               staubli_solve_barrier_entered_.store(true);
-              std::fprintf(stderr, "[STAUBLI_OMPL_INFLIGHT] SOLVE_ENTERED context=%p\\n", static_cast<const void*>(this));
+              std::fprintf(stderr, "[STAUBLI_OMPL_INFLIGHT] SOLVE_ENTERED context=%p\\\\n", static_cast<const void*>(this));
               std::fflush(stderr);
               const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
               while (!staubli_solve_barrier_release_.load() && std::chrono::steady_clock::now() < deadline)
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }"""
-          if "STAUBLI_OMPL_INFLIGHT] SOLVE_ENTERED" not in ompl_context_source:
-              if ompl_context_source.count(ompl_solve_anchor) != 1:
-                  raise SystemExit("Could not locate unique OMPL solve(timeout,count) entry.")
-              ompl_context_source = ompl_context_source.replace(ompl_solve_anchor, ompl_solve_probe, 1)
+            }
+          """
+              ompl_context_source = (
+                  ompl_context_source[:solve_brace + 1] + ompl_barrier_code + ompl_context_source[solve_brace + 1:]
+              )
           ompl_terminate_anchor = "bool ModelBasedPlanningContext::terminate()\n{\n"
           if "staubli_context_terminated_.store(true)" not in ompl_context_source:
               if ompl_context_source.count(ompl_terminate_anchor) != 1:
