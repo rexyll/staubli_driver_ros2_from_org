@@ -1060,7 +1060,7 @@ jobs:
                                                []() { return staubli_probe_fast_finished; }))
                 {
                   std::fprintf(stderr, "[STAUBLI_ACTIVE_PROBE] BARRIER_TIMEOUT role=slow pipeline=%p\\n",
-                               static_cast<const void*>(this));
+                    static_cast<const void*>(this));
                   std::fflush(stderr);
                   active_ = false;
                   return false;
@@ -1706,32 +1706,32 @@ jobs:
           pilz_context_path.write_text(pilz_context_source)
 
 
-           # Count real OMPL PlanningContext terminate() calls for the two-token ownership probe.
-           ompl_context_path = Path(
+          # Count real OMPL PlanningContext terminate() calls for the two-token ownership probe.
+          ompl_context_path = Path(
                "/tmp/moveit_ws/src/moveit2/moveit_planners/ompl/ompl_interface/src/model_based_planning_context.cpp"
            )
-           ompl_context_source = ompl_context_path.read_text()
-           if "#include <cstdio>" not in ompl_context_source:
+          ompl_context_source = ompl_context_path.read_text()
+          if "#include <cstdio>" not in ompl_context_source:
                include_anchor = "#include <boost/algorithm/string/trim.hpp>\n"
-               if ompl_context_source.count(include_anchor) != 1:
-                   raise SystemExit("Could not locate unique OMPL context include anchor for diagnostics.")
-               ompl_context_source = ompl_context_source.replace(
+              if ompl_context_source.count(include_anchor) != 1:
+                  raise SystemExit("Could not locate unique OMPL context include anchor for diagnostics.")
+              ompl_context_source = ompl_context_source.replace(
                    include_anchor, include_anchor + "#include <cstdio>\n", 1
                )
-           ompl_terminate_anchor = """bool ModelBasedPlanningContext::terminate()
+          ompl_terminate_anchor = """bool ModelBasedPlanningContext::terminate()
            {
              std::unique_lock<std::mutex> slock(ptc_lock_);"""
-           ompl_terminate_probe = """bool ModelBasedPlanningContext::terminate()
+          ompl_terminate_probe = """bool ModelBasedPlanningContext::terminate()
            {
              std::fprintf(stderr, "[STAUBLI_OMPL_CONTEXT_TERMINATE] context=%p\\n",
                           static_cast<const void*>(this));
              std::fflush(stderr);
              std::unique_lock<std::mutex> slock(ptc_lock_);"""
-           if "STAUBLI_OMPL_CONTEXT_TERMINATE" not in ompl_context_source:
-               if ompl_context_source.count(ompl_terminate_anchor) != 1:
-                   raise SystemExit("Could not locate unique OMPL ModelBasedPlanningContext::terminate() anchor.")
-               ompl_context_source = ompl_context_source.replace(ompl_terminate_anchor, ompl_terminate_probe, 1)
-           ompl_context_path.write_text(ompl_context_source)
+          if "STAUBLI_OMPL_CONTEXT_TERMINATE" not in ompl_context_source:
+              if ompl_context_source.count(ompl_terminate_anchor) != 1:
+                  raise SystemExit("Could not locate unique OMPL ModelBasedPlanningContext::terminate() anchor.")
+              ompl_context_source = ompl_context_source.replace(ompl_terminate_anchor, ompl_terminate_probe, 1)
+          ompl_context_path.write_text(ompl_context_source)
           if not (
               "class StaubliSolveBarrierProbe" in planning_interface_source
               and "public planning_interface::StaubliSolveBarrierProbe" in pilz_context_source
