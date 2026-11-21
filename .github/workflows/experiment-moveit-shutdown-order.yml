@@ -808,7 +808,7 @@ jobs:
                   "\nprivate:\n",
                   "\n  // CI-only inspection hook for the request-ownership regression.\n"
                   "  planning_interface::PlanningContextPtr staubliTestLatestContext() const;\n"
-                  "  size_t staubliTestActiveRequestCount() const;\n"
+                  "  std::size_t staubliTestActiveRequestCount() const;\n"
                   "  bool staubliTestRequestTokenLifecycle() const;\n"
                   "\nprivate:\n",
                   1
@@ -1236,11 +1236,11 @@ jobs:
               }
               if (request_token->isCancelled())
               {
-                std::fprintf(stderr, "[STAUBLI_MULTI_TOKEN] CANCEL_OBSERVED role=%s token=%p\\n",
-                             role, static_cast<const void*>(request_token.get()));
+                res.error_code = moveit::core::MoveItErrorCode::PLANNING_FAILED;
+                std::fprintf(stderr, "[STAUBLI_MULTI_TOKEN] CANCEL_OBSERVED role=%s token=%p code=%d\\n",
+                             role, static_cast<const void*>(request_token.get()), res.error_code.val);
                 std::fflush(stderr);
                 res.error_code = moveit::core::MoveItErrorCode::PLANNING_FAILED;
-                return false;
               }
             }
             const char* staubli_cross_pipeline_env = std::getenv("STAUBLI_CROSS_PIPELINE_PROBE");
@@ -1353,7 +1353,7 @@ jobs:
             active_ = !active_requests_.empty();
           }
 
-          size_t PlanningPipeline::staubliTestActiveRequestCount() const
+          std::size_t PlanningPipeline::staubliTestActiveRequestCount() const
           {
             std::lock_guard<std::mutex> lock(active_requests_mutex_);
             return active_requests_.size();
