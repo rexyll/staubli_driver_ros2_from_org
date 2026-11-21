@@ -1240,7 +1240,7 @@ jobs:
                 std::fprintf(stderr, "[STAUBLI_MULTI_TOKEN] CANCEL_OBSERVED role=%s token=%p code=%d\\n",
                              role, static_cast<const void*>(request_token.get()), res.error_code.val);
                 std::fflush(stderr);
-                res.error_code = moveit::core::MoveItErrorCode::PLANNING_FAILED;
+                return false;
               }
             }
             const char* staubli_cross_pipeline_env = std::getenv("STAUBLI_CROSS_PIPELINE_PROBE");
@@ -1946,7 +1946,7 @@ jobs:
                   self.assertTrue(idle_future.done(), "Multi-token pipeline idle query timed out")
                   self.assertIn("ompl_active=0", idle_future.result().message)
                   self.assertIn("pilz_active=0", idle_future.result().message)
-                  print("[STAUBLI_MULTI_TOKEN_CLIENT] PASS requests=2 tokens=2 contexts=2 terminate_dispatches=2 ompl_active=0 pilz_active=0")
+                  print("[STAUBLI_MULTI_TOKEN_CLIENT] PASS requests=2 tokens=2 contexts=2 terminate_dispatches=2 internal_code=PLANNING_FAILED outer_plan=FAILURE outer_sequence=FAILURE ompl_active=0 pilz_active=0")
           '''
 
           concurrency_method = '''
@@ -2718,16 +2718,31 @@ jobs:
               and match.group(1) in multi_tokens
           ]
           multi_cancel_observed = [
-              match.group(1) for line in lines
+              (
+                  token_match.group(1),
+                  int(code_match.group(1)),
+              )
+              for line in lines
               if "[STAUBLI_MULTI_TOKEN] CANCEL_OBSERVED " in line
-              and (match := re.search(r"token=(0x[0-9a-fA-F]+)", line))
+              and (token_match := re.search(r"token=(0x[0-9a-fA-F]+)", line))
+              and (code_match := re.search(r"code=(-?\\d+)", line))
+          ]
+          multi_client_internal = [
+              line for line in lines
+              if "[STAUBLI_MULTI_TOKEN_CLIENT] PASS " in line
+              and "internal_code=PLANNING_FAILED" in line
+              and "outer_plan=FAILURE" in line
+              and "outer_sequence=FAILURE" in line
           ]
           if (
               len(held_roles) != 2 or {match.group(1) for match in held_roles if match} != {"a", "b"}
               or len(multi_contexts) != 2 or len(multi_tokens) != 2 or len(multi_pipeline_ptrs) != 1
               or len(multi_terminate_contexts) != 2 or set(multi_terminate_contexts) != multi_contexts
               or len(multi_cancel_tokens) != 2 or set(multi_cancel_tokens) != multi_tokens
-              or len(multi_cancel_observed) != 2 or set(multi_cancel_observed) != multi_tokens
+              or len(multi_cancel_observed) != 2
+              or {token for token, _ in multi_cancel_observed} != multi_tokens
+              or {code for _, code in multi_cancel_observed} != {-1}
+              or len(multi_client_internal) != 1
           ):
               raise SystemExit(
                   "Two simultaneous OMPL request tokens did not each receive exactly one context terminate and cancellation: "
