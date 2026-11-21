@@ -2501,8 +2501,10 @@ jobs:
           cross_released = [line for line in lines if "[STAUBLI_CROSS_PIPELINE] A_OMPL_RELEASED released=1" in line]
           if len(cross_released) != 1:
               raise SystemExit(f"OMPL cross-pipeline barrier did not release cleanly: {cross_released}")
+          # The solve-barrier callback logs SOLVE_ENTERED before its caller emits
+          # B_CONTEXT_CREATED; assert the observed callback/caller order exactly.
           cross_order = [
-              lines.index(cross_held[0]), lines.index(cross_context[0]), lines.index(inflight_entered[0]),
+              lines.index(cross_held[0]), lines.index(inflight_entered[0]), lines.index(cross_context[0]),
               cross_terminate_events[0][0], lines.index(cross_wrapper[0]),
               lines.index(inflight_terminated[0]), lines.index(inflight_released[0]),
               lines.index(cross_target[0]), lines.index(cross_control[0]), lines.index(cross_release[0]),
