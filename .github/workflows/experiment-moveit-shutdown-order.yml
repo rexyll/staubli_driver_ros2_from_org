@@ -1854,23 +1854,17 @@ jobs:
 
           multi_token_method = '''
               def test_w_same_ompl_two_active_tokens_cancel_both(self):
-                  """Cancel two simultaneously active request tokens in one OMPL pipeline."""
+                  """Cancel two simultaneously active OMPL tokens from PlanService and SequenceService."""
                   plan_client = self.node.create_client(GetMotionPlan, "/plan_kinematic_path")
+                  sequence_client = self.node.create_client(GetMotionSequence, "/plan_sequence_path")
                   status_client = self.node.create_client(Trigger, "/staubli_test_probe_status")
                   terminate_client = self.node.create_client(Trigger, "/staubli_test_terminate_ompl")
                   self.assertTrue(plan_client.wait_for_service(timeout_sec=120.0))
+                  self.assertTrue(sequence_client.wait_for_service(timeout_sec=120.0))
                   self.assertTrue(status_client.wait_for_service(timeout_sec=120.0))
                   self.assertTrue(terminate_client.wait_for_service(timeout_sec=120.0))
 
-                  def make_request(allowed_time):
-                      request = GetMotionPlan.Request()
-                      request.motion_plan_request.group_name = "arm"
-                      request.motion_plan_request.pipeline_id = "ompl"
-                      request.motion_plan_request.allowed_planning_time = allowed_time
-                      request.motion_plan_request.num_planning_attempts = 1
-                      request.motion_plan_request.start_state.is_diff = True
-                      request.motion_plan_request.max_velocity_scaling_factor = 0.5
-                      request.motion_plan_request.max_acceleration_scaling_factor = 0.5
+                  def make_constraints():
                       constraints = Constraints()
                       target_positions = (0.11, 0.21, 0.31, 0.41, 0.51, 0.61)
                       for index, position in enumerate(target_positions, start=1):
@@ -1881,11 +1875,33 @@ jobs:
                           joint.tolerance_below = 0.05
                           joint.weight = 1.0
                           constraints.joint_constraints.append(joint)
-                      request.motion_plan_request.goal_constraints.append(constraints)
-                      return request
+                      return constraints
 
-                  future_a = plan_client.call_async(make_request(7.735))
-                  future_b = plan_client.call_async(make_request(7.736))
+                  plan_request = GetMotionPlan.Request()
+                  plan_request.motion_plan_request.group_name = "arm"
+                  plan_request.motion_plan_request.pipeline_id = "ompl"
+                  plan_request.motion_plan_request.allowed_planning_time = 7.735
+                  plan_request.motion_plan_request.num_planning_attempts = 1
+                  plan_request.motion_plan_request.start_state.is_diff = True
+                  plan_request.motion_plan_request.max_velocity_scaling_factor = 0.5
+                  plan_request.motion_plan_request.max_acceleration_scaling_factor = 0.5
+                  plan_request.motion_plan_request.goal_constraints.append(make_constraints())
+
+                  sequence_request = GetMotionSequence.Request()
+                  sequence_item = MotionSequenceItem()
+                  sequence_item.req.group_name = "arm"
+                  sequence_item.req.pipeline_id = "ompl"
+                  sequence_item.req.allowed_planning_time = 7.736
+                  sequence_item.req.num_planning_attempts = 1
+                  sequence_item.req.start_state.is_diff = True
+                  sequence_item.req.max_velocity_scaling_factor = 0.5
+                  sequence_item.req.max_acceleration_scaling_factor = 0.5
+                  sequence_item.req.goal_constraints.append(make_constraints())
+                  sequence_item.blend_radius = 0.0
+                  sequence_request.request.items.append(sequence_item)
+
+                  future_a = plan_client.call_async(plan_request)
+                  future_b = sequence_client.call_async(sequence_request)
                   both_held = False
                   for _ in range(300):
                       status_future = status_client.call_async(Trigger.Request())
@@ -1896,7 +1912,7 @@ jobs:
                           both_held = True
                           break
                       time.sleep(0.05)
-                  self.assertTrue(both_held, "Both independent OMPL requests did not reach their held contexts")
+                  self.assertTrue(both_held, "PlanService and SequenceService did not both hold active OMPL contexts")
 
                   terminate_future = terminate_client.call_async(Trigger.Request())
                   rclpy.spin_until_future_complete(self.node, terminate_future, timeout_sec=30.0)
@@ -1907,12 +1923,13 @@ jobs:
 
                   rclpy.spin_until_future_complete(self.node, future_a, timeout_sec=120.0)
                   rclpy.spin_until_future_complete(self.node, future_b, timeout_sec=120.0)
-                  self.assertTrue(future_a.done(), "First active OMPL request did not finish after cancellation")
-                  self.assertTrue(future_b.done(), "Second active OMPL request did not finish after cancellation")
+                  self.assertTrue(future_a.done(), "PlanService active OMPL request did not finish after cancellation")
+                  self.assertTrue(future_b.done(), "SequenceService active OMPL request did not finish after cancellation")
                   response_a = future_a.result()
                   response_b = future_b.result()
                   self.assertEqual(response_a.motion_plan_response.error_code.val, MoveItErrorCodes.FAILURE)
-                  self.assertEqual(response_b.motion_plan_response.error_code.val, MoveItErrorCodes.FAILURE)
+                  self.assertEqual(response_b.response.error_code.val, MoveItErrorCodes.FAILURE)
+                  self.assertFalse(response_b.response.planned_trajectories)
 
                   idle_future = status_client.call_async(Trigger.Request())
                   rclpy.spin_until_future_complete(self.node, idle_future, timeout_sec=5.0)
