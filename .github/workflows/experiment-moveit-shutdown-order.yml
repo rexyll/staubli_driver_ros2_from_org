@@ -128,6 +128,9 @@ jobs:
             nh->declare_parameter<bool>("staubli_test_release_slow", false);
             nh->declare_parameter<bool>("staubli_test_cross_pipeline_held", false);
             nh->declare_parameter<bool>("staubli_test_release_cross_pipeline", false);
+            nh->declare_parameter<bool>("staubli_test_multi_a_held", false);
+            nh->declare_parameter<bool>("staubli_test_multi_b_held", false);
+            nh->declare_parameter<bool>("staubli_test_multi_release", false);
             staubli_probe_callback_group =
                 nh->create_callback_group(rclcpp::CallbackGroupType::Reentrant);
             staubli_probe_status_service = nh->create_service<std_srvs::srv::Trigger>(
@@ -137,16 +140,22 @@ jobs:
                   (void)request;
                   bool slow_held = false;
                   bool cross_held = false;
+                  bool multi_a_held = false;
+                  bool multi_b_held = false;
                   nh->get_parameter("staubli_test_slow_held", slow_held);
                   nh->get_parameter("staubli_test_cross_pipeline_held", cross_held);
+                  nh->get_parameter("staubli_test_multi_a_held", multi_a_held);
+                  nh->get_parameter("staubli_test_multi_b_held", multi_b_held);
                   const auto& pipelines = moveit_cpp->getPlanningPipelines();
                   const auto ompl = pipelines.find("ompl");
                   const auto pilz = pipelines.find("pilz_industrial_motion_planner");
                   const bool ompl_active = ompl != pipelines.end() && ompl->second && ompl->second->isActive();
                   const bool pilz_active = pilz != pipelines.end() && pilz->second && pilz->second->isActive();
-                  response->success = slow_held || cross_held;
+                  response->success = slow_held || cross_held || (multi_a_held && multi_b_held);
                   response->message = "slow_held=" + std::to_string(slow_held) +
                                       " cross_held=" + std::to_string(cross_held) +
+                                      " multi_a_held=" + std::to_string(multi_a_held) +
+                                      " multi_b_held=" + std::to_string(multi_b_held) +
                                       " ompl_active=" + std::to_string(ompl_active) +
                                       " pilz_active=" + std::to_string(pilz_active);
                 },
@@ -170,9 +179,18 @@ jobs:
                   const auto pipeline = pipelines.find("ompl");
                   const bool active_before =
                       pipeline != pipelines.end() && pipeline->second && pipeline->second->isActive();
+                  bool multi_a_held = false;
+                  bool multi_b_held = false;
+                  nh->get_parameter("staubli_test_multi_a_held", multi_a_held);
+                  nh->get_parameter("staubli_test_multi_b_held", multi_b_held);
+                  const bool multi_token_scenario = multi_a_held && multi_b_held;
                   const bool wrapper_result = moveit_cpp->terminatePlanningPipeline("ompl");
-                  std::fprintf(stderr, "[STAUBLI_TERMINATE_PROBE] WRAPPER_RETURN active_before=%d result=%d\\n",
-                               active_before ? 1 : 0, wrapper_result ? 1 : 0);
+                  if (multi_token_scenario)
+                    std::fprintf(stderr, "[STAUBLI_MULTI_TOKEN] WRAPPER_RETURN active_before=%d result=%d\\n",
+                                 active_before ? 1 : 0, wrapper_result ? 1 : 0);
+                  else
+                    std::fprintf(stderr, "[STAUBLI_TERMINATE_PROBE] WRAPPER_RETURN active_before=%d result=%d\\n",
+                                 active_before ? 1 : 0, wrapper_result ? 1 : 0);
                   std::fflush(stderr);
                   const bool token_lifecycle_ok =
                       pipeline != pipelines.end() && pipeline->second &&
@@ -182,6 +200,13 @@ jobs:
                   response->success = wrapper_result && token_lifecycle_ok;
                   response->message = "MoveItCpp terminatePlanningPipeline invoked; token lifecycle probe " +
                                       std::string(token_lifecycle_ok ? "passed" : "failed");
+                  if (multi_token_scenario)
+                  {
+                    const auto multi_release_result =
+                        nh->set_parameter(rclcpp::Parameter("staubli_test_multi_release", true));
+                    std::fprintf(stderr, "[STAUBLI_MULTI_TOKEN] RELEASE signal=%d\\n",
+                                 multi_release_result.successful ? 1 : 0);
+                  }
                   const auto release_result =
                       nh->set_parameter(rclcpp::Parameter("staubli_test_release_slow", true));
                   std::fprintf(stderr, "[STAUBLI_TERMINATE_PROBE] RELEASE slow=%d\\n",
@@ -344,6 +369,9 @@ jobs:
           if not (
               "staubli_test_terminate_ompl" in source
               and "staubli_test_cross_pipeline_terminate" in source
+              and "staubli_test_multi_a_held" in source
+              and "staubli_test_multi_b_held" in source
+              and "staubli_test_multi_release" in source
               and "staubli_test_probe_status" in source
               and "CallbackGroupType::Reentrant" in source
               and "staubli_probe_status_service" in source
@@ -1172,6 +1200,43 @@ jobs:
               res.error_code = moveit::core::MoveItErrorCode::PLANNING_FAILED;
               return false;
             }
+            const bool staubli_multi_token_a = std::fabs(req.allowed_planning_time - 7.735) < 1e-9;
+            const bool staubli_multi_token_b = std::fabs(req.allowed_planning_time - 7.736) < 1e-9;
+            if (staubli_multi_token_a || staubli_multi_token_b)
+            {
+              const char* role = staubli_multi_token_a ? "a" : "b";
+              const char* held_parameter = staubli_multi_token_a ?
+                  "staubli_test_multi_a_held" : "staubli_test_multi_b_held";
+              node_->set_parameter(rclcpp::Parameter(held_parameter, true));
+              std::fprintf(stderr, "[STAUBLI_MULTI_TOKEN] HELD role=%s pipeline=%p token=%p context=%p\\n",
+                           role, static_cast<const void*>(this), static_cast<const void*>(request_token.get()),
+                           static_cast<const void*>(context.get()));
+              std::fflush(stderr);
+              bool multi_release = false;
+              const auto multi_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+              while (std::chrono::steady_clock::now() < multi_deadline && !multi_release)
+              {
+                node_->get_parameter("staubli_test_multi_release", multi_release);
+                if (!multi_release)
+                  std::this_thread::sleep_for(std::chrono::milliseconds(5));
+              }
+              std::fprintf(stderr, "[STAUBLI_MULTI_TOKEN] RELEASED role=%s release=%d\\n",
+                           role, multi_release ? 1 : 0);
+              std::fflush(stderr);
+              if (!multi_release)
+              {
+                res.error_code = moveit::core::MoveItErrorCode::PLANNING_FAILED;
+                return false;
+              }
+              if (request_token->isCancelled())
+              {
+                std::fprintf(stderr, "[STAUBLI_MULTI_TOKEN] CANCEL_OBSERVED role=%s token=%p\\n",
+                             role, static_cast<const void*>(request_token.get()));
+                std::fflush(stderr);
+                res.error_code = moveit::core::MoveItErrorCode::PLANNING_FAILED;
+                return false;
+              }
+            }
             const char* staubli_cross_pipeline_env = std::getenv("STAUBLI_CROSS_PIPELINE_PROBE");
             if (staubli_cross_pipeline_env != nullptr && staubli_cross_pipeline_env[0] == '1' &&
                 staubli_cross_pipeline_env[1] == '\\0' &&
@@ -1639,11 +1704,40 @@ jobs:
               raise SystemExit("Expected exactly one Pilz PlanningContextBase::terminate() implementation.")
           pilz_context_source = pilz_context_source.replace(old_pilz_terminate, new_pilz_terminate, 1)
           pilz_context_path.write_text(pilz_context_source)
+
+
+           # Count real OMPL PlanningContext terminate() calls for the two-token ownership probe.
+           ompl_context_path = Path(
+               "/tmp/moveit_ws/src/moveit2/moveit_planners/ompl/ompl_interface/src/model_based_planning_context.cpp"
+           )
+           ompl_context_source = ompl_context_path.read_text()
+           if "#include <cstdio>" not in ompl_context_source:
+               include_anchor = "#include <boost/algorithm/string/trim.hpp>\n"
+               if ompl_context_source.count(include_anchor) != 1:
+                   raise SystemExit("Could not locate unique OMPL context include anchor for diagnostics.")
+               ompl_context_source = ompl_context_source.replace(
+                   include_anchor, include_anchor + "#include <cstdio>\n", 1
+               )
+           ompl_terminate_anchor = """bool ModelBasedPlanningContext::terminate()
+           {
+             std::unique_lock<std::mutex> slock(ptc_lock_);"""
+           ompl_terminate_probe = """bool ModelBasedPlanningContext::terminate()
+           {
+             std::fprintf(stderr, "[STAUBLI_OMPL_CONTEXT_TERMINATE] context=%p\\n",
+                          static_cast<const void*>(this));
+             std::fflush(stderr);
+             std::unique_lock<std::mutex> slock(ptc_lock_);"""
+           if "STAUBLI_OMPL_CONTEXT_TERMINATE" not in ompl_context_source:
+               if ompl_context_source.count(ompl_terminate_anchor) != 1:
+                   raise SystemExit("Could not locate unique OMPL ModelBasedPlanningContext::terminate() anchor.")
+               ompl_context_source = ompl_context_source.replace(ompl_terminate_anchor, ompl_terminate_probe, 1)
+           ompl_context_path.write_text(ompl_context_source)
           if not (
               "class StaubliSolveBarrierProbe" in planning_interface_source
               and "public planning_interface::StaubliSolveBarrierProbe" in pilz_context_source
               and "armStaubliSolveBarrier" in pilz_context_source
               and "staubli_solve_barrier_entered_" in pilz_context_source
+              and "STAUBLI_OMPL_CONTEXT_TERMINATE" in ompl_context_source
           ):
               raise SystemExit("Pilz in-flight solve barrier overlay validation failed.")
 
