@@ -1708,25 +1708,25 @@ jobs:
 
           # Count real OMPL PlanningContext terminate() calls for the two-token ownership probe.
           ompl_context_path = Path(
-               "/tmp/moveit_ws/src/moveit2/moveit_planners/ompl/ompl_interface/src/model_based_planning_context.cpp"
-           )
+              "/tmp/moveit_ws/src/moveit2/moveit_planners/ompl/ompl_interface/src/model_based_planning_context.cpp"
+          )
           ompl_context_source = ompl_context_path.read_text()
           if "#include <cstdio>" not in ompl_context_source:
-               include_anchor = "#include <boost/algorithm/string/trim.hpp>\n"
+              include_anchor = "#include <boost/algorithm/string/trim.hpp>\n"
               if ompl_context_source.count(include_anchor) != 1:
                   raise SystemExit("Could not locate unique OMPL context include anchor for diagnostics.")
               ompl_context_source = ompl_context_source.replace(
-                   include_anchor, include_anchor + "#include <cstdio>\n", 1
-               )
+                  include_anchor, include_anchor + "#include <cstdio>\n", 1
+              )
           ompl_terminate_anchor = """bool ModelBasedPlanningContext::terminate()
-           {
-             std::unique_lock<std::mutex> slock(ptc_lock_);"""
+{
+  std::unique_lock<std::mutex> slock(ptc_lock_);"""
           ompl_terminate_probe = """bool ModelBasedPlanningContext::terminate()
-           {
-             std::fprintf(stderr, "[STAUBLI_OMPL_CONTEXT_TERMINATE] context=%p\\n",
-                          static_cast<const void*>(this));
-             std::fflush(stderr);
-             std::unique_lock<std::mutex> slock(ptc_lock_);"""
+{
+  std::fprintf(stderr, "[STAUBLI_OMPL_CONTEXT_TERMINATE] context=%p\\n",
+               static_cast<const void*>(this));
+  std::fflush(stderr);
+  std::unique_lock<std::mutex> slock(ptc_lock_);"""
           if "STAUBLI_OMPL_CONTEXT_TERMINATE" not in ompl_context_source:
               if ompl_context_source.count(ompl_terminate_anchor) != 1:
                   raise SystemExit("Could not locate unique OMPL ModelBasedPlanningContext::terminate() anchor.")
