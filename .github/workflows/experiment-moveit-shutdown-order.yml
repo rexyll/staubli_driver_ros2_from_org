@@ -2717,11 +2717,13 @@ jobs:
               re.search(r"this=(0x[0-9a-fA-F]+)", line)
               for line in terminate_entries
           ]
-          mapped_ompl_ptr = re.search(r"pipeline=(0x[0-9a-fA-F]+)", mapped_ompl[0]) if len(mapped_ompl) == 1 else None
+          mapped_ompl_ptrs = [
+              re.search(r"pipeline=(0x[0-9a-fA-F]+)", line) for line in mapped_ompl
+          ]
           if (
-              not cross_pipeline_ptr or not mapped_ompl_ptr
+              not cross_pipeline_ptr or len(mapped_ompl_ptrs) != 2
               or any(ptr is None or ptr.group(1) != cross_pipeline_ptr.group(1) for ptr in terminate_ptrs)
-              or mapped_ompl_ptr.group(1) != cross_pipeline_ptr.group(1)
+              or any(ptr is None or ptr.group(1) != cross_pipeline_ptr.group(1) for ptr in mapped_ompl_ptrs)
               or multi_pipeline_ptrs != {cross_pipeline_ptr.group(1)}
           ):
               raise SystemExit(
