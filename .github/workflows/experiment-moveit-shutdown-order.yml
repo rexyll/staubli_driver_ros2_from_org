@@ -2615,10 +2615,10 @@ jobs:
                   "Pilz in-flight/after-terminate/negative-control state mismatch: "
                   f"inflight={inflight_terminated}/{inflight_released}, target={cross_target}, control={cross_control}"
               )
-          if len(terminate_entries) != 2:
+          if len(terminate_entries) != 3:
               raise SystemExit(
-                  "Expected exactly two actual PlanningPipeline::terminate entries "
-                  "(one cross-pipeline isolation call and one same-pipeline overlap call), "
+                  "Expected exactly three actual PlanningPipeline::terminate entries "
+                  "(cross-pipeline, one-active-request overlap, and two-active-token scenarios), "
                   f"got {terminate_entries}"
               )
           # The regression deliberately invokes terminate once in each independent scenario.
@@ -2643,12 +2643,74 @@ jobs:
               event for event in terminate_events
               if slow_held_index < event[0] < wrapper_return_index
           ]
+          multi_held = [line for line in lines if "[STAUBLI_MULTI_TOKEN] HELD " in line]
+          multi_wrapper = [line for line in lines if "[STAUBLI_MULTI_TOKEN] WRAPPER_RETURN " in line]
+          multi_release_signal = [line for line in lines if "[STAUBLI_MULTI_TOKEN] RELEASE signal=1" in line]
+          multi_released = [line for line in lines if "[STAUBLI_MULTI_TOKEN] RELEASED " in line]
+          multi_held_indices = [i for i, line in enumerate(lines) if "[STAUBLI_MULTI_TOKEN] HELD " in line]
+          multi_wrapper_indices = [i for i, line in enumerate(lines) if "[STAUBLI_MULTI_TOKEN] WRAPPER_RETURN " in line]
+          multi_terminate_events = [
+              event for event in terminate_events
+              if len(multi_held_indices) == 2 and len(multi_wrapper_indices) == 1
+              and max(multi_held_indices) < event[0] < multi_wrapper_indices[0]
+          ]
           cross_terminate_entries = [line for _, line in cross_terminate_events]
           same_pipeline_terminate_entries = [line for _, line in same_pipeline_terminate_events]
-          if len(cross_terminate_events) != 1 or len(same_pipeline_terminate_events) != 1:
+          if (
+              len(cross_terminate_events) != 1 or len(same_pipeline_terminate_events) != 1
+              or len(multi_held) != 2 or len(multi_wrapper) != 1
+              or len(multi_release_signal) != 1 or len(multi_released) != 2
+              or len(multi_terminate_events) != 1
+          ):
               raise SystemExit(
-                  "Actual terminate calls were not uniquely associated with both request scenarios: "
-                  f"cross={cross_terminate_entries}, same_pipeline={same_pipeline_terminate_entries}"
+                  "Actual terminate calls were not uniquely associated with cross, single-request, and two-token scenarios: "
+                  f"cross={cross_terminate_entries}, same_pipeline={same_pipeline_terminate_entries}, "
+                  f"multi_held={multi_held}, multi_wrapper={multi_wrapper}, "
+                  f"multi_terminate={multi_terminate_events}, multi_release={multi_release_signal}, "
+                  f"multi_released={multi_released}"
+              )
+          held_roles = [re.search(r"role=([ab])", line) for line in multi_held]
+          multi_contexts = {
+              match.group(1) for line in multi_held
+              if (match := re.search(r"context=(0x[0-9a-fA-F]+)", line))
+          }
+          multi_tokens = {
+              match.group(1) for line in multi_held
+              if (match := re.search(r"token=(0x[0-9a-fA-F]+)", line))
+          }
+          multi_pipeline_ptrs = {
+              match.group(1) for line in multi_held
+              if (match := re.search(r"pipeline=(0x[0-9a-fA-F]+)", line))
+          }
+          multi_terminate_contexts = [
+              match.group(1) for line in lines
+              if "[STAUBLI_OMPL_CONTEXT_TERMINATE] " in line
+              and (match := re.search(r"context=(0x[0-9a-fA-F]+)", line))
+          ]
+          multi_cancel_tokens = [
+              match.group(1) for line in lines
+              if "[STAUBLI_REQUEST_TOKEN] CANCEL_REQUESTED " in line
+              and "accepted=1" in line
+              and (match := re.search(r"token=(0x[0-9a-fA-F]+)", line))
+              and match.group(1) in multi_tokens
+          ]
+          multi_cancel_observed = [
+              match.group(1) for line in lines
+              if "[STAUBLI_MULTI_TOKEN] CANCEL_OBSERVED " in line
+              and (match := re.search(r"token=(0x[0-9a-fA-F]+)", line))
+          ]
+          if (
+              len(held_roles) != 2 or {match.group(1) for match in held_roles if match} != {"a", "b"}
+              or len(multi_contexts) != 2 or len(multi_tokens) != 2 or len(multi_pipeline_ptrs) != 1
+              or len(multi_terminate_contexts) != 2 or set(multi_terminate_contexts) != multi_contexts
+              or len(multi_cancel_tokens) != 2 or set(multi_cancel_tokens) != multi_tokens
+              or len(multi_cancel_observed) != 2 or set(multi_cancel_observed) != multi_tokens
+          ):
+              raise SystemExit(
+                  "Two simultaneous OMPL request tokens did not each receive exactly one context terminate and cancellation: "
+                  f"roles={held_roles}, contexts={multi_contexts}, tokens={multi_tokens}, "
+                  f"pipelines={multi_pipeline_ptrs}, context_terminates={multi_terminate_contexts}, "
+                  f"token_cancels={multi_cancel_tokens}, token_observed={multi_cancel_observed}"
               )
           cross_pipeline_ptr = re.search(r"pipeline=(0x[0-9a-fA-F]+)", cross_held[0])
           mapped_ompl = [
@@ -2664,6 +2726,7 @@ jobs:
               not cross_pipeline_ptr or not mapped_ompl_ptr
               or any(ptr is None or ptr.group(1) != cross_pipeline_ptr.group(1) for ptr in terminate_ptrs)
               or mapped_ompl_ptr.group(1) != cross_pipeline_ptr.group(1)
+              or multi_pipeline_ptrs != {cross_pipeline_ptr.group(1)}
           ):
               raise SystemExit(
                   "Both terminate entries must target the exact OMPL pipeline used by the "
@@ -2675,6 +2738,15 @@ jobs:
               raise SystemExit(f"OMPL cross-pipeline barrier did not release cleanly: {cross_released}")
           # The solve-barrier callback logs SOLVE_ENTERED before its caller emits
           # B_CONTEXT_CREATED; assert the observed callback/caller order exactly.
+          multi_order = [
+              max(multi_held_indices),
+              multi_terminate_events[0][0],
+              multi_wrapper_indices[0],
+              lines.index(multi_release_signal[0]),
+              min(i for i, line in enumerate(lines) if "[STAUBLI_MULTI_TOKEN] RELEASED " in line),
+          ]
+          if multi_order != sorted(multi_order):
+              raise SystemExit(f"Two-active-token terminate/release event ordering invalid: {multi_order}")
           cross_order = [
               lines.index(cross_held[0]), lines.index(inflight_entered[0]), lines.index(cross_context[0]),
               cross_terminate_events[0][0], lines.index(cross_wrapper[0]),
