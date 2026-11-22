@@ -884,6 +884,7 @@ jobs:
               std::condition_variable condition;
               bool cancel_requested{ false };
               bool completed{ false };
+              bool solve_started{ false };
               bool terminate_dispatched{ false };
               bool terminate_in_flight{ false };
               planning_interface::PlanningContextPtr context;
@@ -926,7 +927,7 @@ jobs:
                   if (completed)
                     return;
                   context = value;
-                  if (cancel_requested && value && !terminate_dispatched)
+                  if (cancel_requested && solve_started && value && !terminate_dispatched)
                   {
                     terminate_dispatched = true;
                     terminate_in_flight = true;
@@ -937,6 +938,26 @@ jobs:
                   dispatchTermination(value);
               }
 
+              bool beginSolve()
+              {
+                planning_interface::PlanningContextPtr value;
+                {
+                  std::lock_guard<std::mutex> lock(mutex);
+                  if (completed)
+                    return false;
+                  solve_started = true;
+                  if (cancel_requested && context && !terminate_dispatched)
+                  {
+                    terminate_dispatched = true;
+                    terminate_in_flight = true;
+                    value = context;
+                  }
+                }
+                if (value)
+                  dispatchTermination(value);
+                return !isCancelled();
+              }
+
               bool requestCancel()
               {
                 planning_interface::PlanningContextPtr value;
@@ -945,7 +966,7 @@ jobs:
                   if (completed)
                     return false;
                   cancel_requested = true;
-                  if (context && !terminate_dispatched)
+                  if (solve_started && context && !terminate_dispatched)
                   {
                     terminate_dispatched = true;
                     terminate_in_flight = true;
@@ -1336,7 +1357,12 @@ jobs:
           )
           pipeline_source = pipeline_source.replace(
               "      context->solve(res);\n",
-              """      context->solve(res);
+              """      if (!request_token->beginSolve())
+            {
+              res.error_code = moveit::core::MoveItErrorCode::PLANNING_FAILED;
+              return false;
+            }
+            context->solve(res);
             if (request_token->isCancelled())
             {
               res.error_code = moveit::core::MoveItErrorCode::PLANNING_FAILED;
