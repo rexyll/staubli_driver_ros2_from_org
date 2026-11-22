@@ -2699,18 +2699,18 @@ jobs:
           launch_tests = sum("Ran 1 test in" in line for line in lines)
           if launch_tests != 1:
               raise SystemExit(f"Expected one launch test execution, observed {launch_tests}")
-          concurrent_suites = sum("Ran 5 tests in" in line for line in lines)
+          concurrent_suites = sum("Ran 6 tests in" in line for line in lines)
           if concurrent_suites != 1:
-              raise SystemExit(f"Expected the five-test pre-shutdown launch suite, observed {concurrent_suites}")
+              raise SystemExit(f"Expected the six-test pre-shutdown launch suite, observed {concurrent_suites}")
           # colcon test-result writes the aggregate summary to result_log, not output_log.
-          # The two-active-token unittest adds one xUnit test case to the prior
-          # nine-test package summary. Fail closed if the count drifts.
+          # The two-active-token and reverse cross-pipeline unittests add two xUnit test cases
+          # to the prior nine-test package summary. Fail closed if the count drifts.
           passing_summaries = sum(
-              "Summary: 10 tests, 0 errors, 0 failures, 0 skipped" in line
+              "Summary: 11 tests, 0 errors, 0 failures, 0 skipped" in line
               for line in result_lines
           )
           if passing_summaries != 1:
-              raise SystemExit(f"Expected one clean 10-test summary, observed {passing_summaries}")
+              raise SystemExit(f"Expected one clean 11-test summary, observed {passing_summaries}")
           cancel_requested = [line for line in lines if "[STAUBLI_REQUEST_TOKEN] CANCEL_REQUESTED " in line]
           cancel_observed = [line for line in lines if "[STAUBLI_REQUEST_TOKEN] CANCEL_OBSERVED " in line]
           if len(cancel_requested) < 2 or len(cancel_observed) < 2:
@@ -3116,7 +3116,7 @@ jobs:
               raise SystemExit("Post-shutdown process-exit assertion failed.")
           print(
               "Uninstrumented A-PSM-retained / B-core order verified; one mock execution succeeded; "
-              "one launch test and all eight package xUnit assertions passed."
+              "one launch test and all eleven package xUnit tests passed."
           )
           PY
             order_rc=$?
