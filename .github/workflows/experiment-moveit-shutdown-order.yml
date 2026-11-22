@@ -964,7 +964,7 @@ jobs:
               std::condition_variable condition;
               bool cancel_requested{ false };
               bool completed{ false };
-              bool solve_started{ false };
+              bool solve_in_flight{ false };
               bool terminate_dispatched{ false };
               bool terminate_in_flight{ false };
               planning_interface::PlanningContextPtr context;
@@ -1001,21 +1001,10 @@ jobs:
 
               void attachContext(const planning_interface::PlanningContextPtr& value)
               {
-                bool dispatch = false;
-                {
-                  std::lock_guard<std::mutex> lock(mutex);
-                  if (completed)
-                    return;
-                  context = value;
-                  if (cancel_requested && solve_started && value && !terminate_dispatched)
-                  {
-                    terminate_dispatched = true;
-                    terminate_in_flight = true;
-                    dispatch = true;
-                  }
-                }
-                if (dispatch)
-                  dispatchTermination(value);
+                std::lock_guard<std::mutex> lock(mutex);
+                if (completed)
+                  return;
+                context = value;
               }
 
               bool beginSolve()
@@ -1023,8 +1012,14 @@ jobs:
                 std::lock_guard<std::mutex> lock(mutex);
                 if (completed || cancel_requested)
                   return false;
-                solve_started = true;
+                solve_in_flight = true;
                 return true;
+              }
+
+              void endSolve()
+              {
+                std::lock_guard<std::mutex> lock(mutex);
+                solve_in_flight = false;
               }
 
               bool requestCancel()
@@ -1035,7 +1030,7 @@ jobs:
                   if (completed)
                     return false;
                   cancel_requested = true;
-                  if (solve_started && context && !terminate_dispatched)
+                  if (solve_in_flight && context && !terminate_dispatched)
                   {
                     terminate_dispatched = true;
                     terminate_in_flight = true;
@@ -1442,8 +1437,17 @@ jobs:
               res.error_code = moveit::core::MoveItErrorCode::PLANNING_FAILED;
               return false;
             }
-            context->solve(res);
-            if (request_token->isCancelled())
+            try
+              {
+                context->solve(res);
+              }
+              catch (...)
+              {
+                request_token->endSolve();
+                throw;
+              }
+              request_token->endSolve();
+              if (request_token->isCancelled())
             {
               res.error_code = moveit::core::MoveItErrorCode::PLANNING_FAILED;
               return false;
@@ -1640,6 +1644,7 @@ jobs:
               return fail("check_5");
             const bool first_cancel = attach_before_cancel->requestCancel();
             const bool repeated_cancel = attach_before_cancel->requestCancel();
+            attach_before_cancel->endSolve();
             const bool attached_finish_cancelled = attach_before_cancel->finish();
             attached_context->finish_returned.store(true);
             if (!first_cancel || !repeated_cancel || !attached_finish_cancelled ||
@@ -1698,6 +1703,23 @@ jobs:
                 blocking_context->terminate_calls.load() != 1 || blocking_context->late_termination.load())
               return fail("check_9");
 
+            // Cancellation between planner contexts must not terminate either the completed
+            // context or the next context before its solve phase begins.
+            auto between_solves = std::make_shared<RequestToken>();
+            auto first_context = std::make_shared<RecordingContext>("first-planner-solve");
+            auto second_context = std::make_shared<RecordingContext>("second-planner-pre-solve");
+            between_solves->attachContext(first_context);
+            if (!between_solves->beginSolve())
+              return fail("check_10");
+            between_solves->endSolve();
+            between_solves->attachContext(second_context);
+            const bool between_cancel_accepted = between_solves->requestCancel();
+            const bool second_solve_started = between_solves->beginSolve();
+            const bool between_finish_cancelled = between_solves->finish();
+            if (!between_cancel_accepted || second_solve_started || !between_finish_cancelled ||
+                first_context->terminate_calls.load() != 0 || second_context->terminate_calls.load() != 0)
+              return fail("check_11");
+
             // Exercise both mutex linearization orders repeatedly.  Accepted cancel means
             // terminate completes before finish returns; otherwise finish won and cancel is ignored.
             for (int iteration = 0; iteration < 32; ++iteration)
@@ -1706,7 +1728,7 @@ jobs:
               auto race_context = std::make_shared<RecordingContext>("finish-cancel-race");
               race_token->attachContext(race_context);
               if (!race_token->beginSolve())
-                return fail("check_10");
+                return fail("check_11");
               std::atomic<bool> start{ false };
               std::atomic<bool> accepted{ false };
               std::atomic<bool> finish_cancelled{ false };
@@ -1728,7 +1750,7 @@ jobs:
               if (finish_cancelled.load() != accepted.load() ||
                   race_context->terminate_calls.load() != expected_terminations ||
                   race_context->late_termination.load() || race_token->requestCancel())
-                return fail("check_11");
+                return fail("check_12");
             }
 
             return registry_size() == registry_baseline;
@@ -1784,6 +1806,8 @@ jobs:
               "RequestGuard request_guard{ this, request_token };" in pipeline_source
               and "request_token->attachContext(context);" in pipeline_source
               and "request_token->beginSolve()" in pipeline_source
+              and "request_token->endSolve()" in pipeline_source
+              and "solve_in_flight" in pipeline_header
               and "request->requestCancel();" in pipeline_source
               and "active_requests_.empty()" in pipeline_source
               and "planner_pair.second->terminate()" not in pipeline_source
