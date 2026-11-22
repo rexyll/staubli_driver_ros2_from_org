@@ -1969,8 +1969,8 @@ jobs:
           # moveit_planners_ompl into the graph, so omitting it leaves the apt-underlay
           # OMPL DSO active and makes the CI-only probe interface unavailable at runtime.
           colcon build --packages-up-to moveit_planners_ompl pilz_industrial_motion_planner --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_FLAGS='-O1 -g -fno-omit-frame-pointer' -DCMAKE_CXX_FLAGS='-O1 -g -fno-omit-frame-pointer' -DBUILD_TESTING=OFF
-          ompl_plugin="$(find /tmp/moveit_ws/install -type f -name libmoveit_ompl_planner_plugin.so -print -quit)"
-          test -n "$ompl_plugin"
+          ompl_plugin="/tmp/moveit_ws/install/moveit_planners_ompl/lib/libmoveit_ompl_planner_plugin.so"
+          test -e "$ompl_plugin"
           echo "Verified patched OMPL plugin installed in overlay: $ompl_plugin"
 
       - name: Fetch and build Stäubli mock workspace against patched MoveIt
