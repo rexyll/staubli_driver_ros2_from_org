@@ -1477,6 +1477,11 @@ jobs:
 
           bool PlanningPipeline::staubliTestRequestTokenLifecycle() const
           {
+            const auto fail = [](const char* reason) {
+              std::fprintf(stderr, "[STAUBLI_TOKEN_LIFECYCLE] fail=%s\\n", reason);
+              std::fflush(stderr);
+              return fail("check_1");
+            };
             class RecordingContext final : public planning_interface::PlanningContext
             {
             public:
@@ -1534,27 +1539,27 @@ jobs:
             unregisterActiveRequest(completed_token);
             if (completed_cancelled || stale_snapshot->requestCancel() || completed_context->terminate_calls.load() != 0 ||
                 completed_context->late_termination.load() || registry_size() != registry_baseline)
-              return false;
+              return fail("check_2");
 
             // A cancellation received before solve starts must remain sticky without terminating an attached context.
             auto cancel_before_attach = std::make_shared<RequestToken>();
             auto late_context = std::make_shared<RecordingContext>("cancel-before-attach");
             if (!cancel_before_attach->requestCancel())
-              return false;
+              return fail("check_3");
             cancel_before_attach->attachContext(late_context);
             const bool late_solve_started = cancel_before_attach->beginSolve();
             const bool late_finish_cancelled = cancel_before_attach->finish();
             late_context->finish_returned.store(true);
             if (late_solve_started || !late_finish_cancelled || late_context->terminate_calls.load() != 0 || late_context->late_termination.load() ||
                 cancel_before_attach->requestCancel())
-              return false;
+              return fail("check_4");
 
             // Once solve has started, cancellation must dispatch terminate exactly once.
             auto attach_before_cancel = std::make_shared<RequestToken>();
             auto attached_context = std::make_shared<RecordingContext>("attach-before-cancel");
             attach_before_cancel->attachContext(attached_context);
             if (!attach_before_cancel->beginSolve())
-              return false;
+              return fail("check_5");
             const bool first_cancel = attach_before_cancel->requestCancel();
             const bool repeated_cancel = attach_before_cancel->requestCancel();
             const bool attached_finish_cancelled = attach_before_cancel->finish();
@@ -1562,7 +1567,7 @@ jobs:
             if (!first_cancel || !repeated_cancel || !attached_finish_cancelled ||
                 attached_context->terminate_calls.load() != 1 ||
                 attached_context->late_termination.load() || attach_before_cancel->requestCancel())
-              return false;
+              return fail("check_6");
 
             // finish() must wait for a terminate() call that already crossed the token mutex.
             auto blocking_token = std::make_shared<RequestToken>();
@@ -1570,7 +1575,7 @@ jobs:
             blocking_context->block_termination.store(true);
             blocking_token->attachContext(blocking_context);
             if (!blocking_token->beginSolve())
-              return false;
+              return fail("check_7");
             std::atomic<bool> blocking_cancel_accepted{ false };
             std::thread cancel_thread([&]() {
               blocking_cancel_accepted.store(blocking_token->requestCancel());
@@ -1584,7 +1589,7 @@ jobs:
               blocking_context->release_termination.store(true);
               cancel_thread.join();
               blocking_token->finish();
-              return false;
+              return fail("check_8");
             }
             std::atomic<bool> finish_returned{ false };
             std::atomic<bool> blocking_finish_cancelled{ false };
@@ -1613,7 +1618,7 @@ jobs:
             if (!completion_waiting_for_terminate || finish_returned_early ||
                 !blocking_cancel_accepted.load() || !blocking_finish_cancelled.load() || !finish_returned.load() ||
                 blocking_context->terminate_calls.load() != 1 || blocking_context->late_termination.load())
-              return false;
+              return fail("check_9");
 
             // Exercise both mutex linearization orders repeatedly.  Accepted cancel means
             // terminate completes before finish returns; otherwise finish won and cancel is ignored.
@@ -1623,7 +1628,7 @@ jobs:
               auto race_context = std::make_shared<RecordingContext>("finish-cancel-race");
               race_token->attachContext(race_context);
               if (!race_token->beginSolve())
-                return false;
+                return fail("check_10");
               std::atomic<bool> start{ false };
               std::atomic<bool> accepted{ false };
               std::atomic<bool> finish_cancelled{ false };
@@ -1645,7 +1650,7 @@ jobs:
               if (finish_cancelled.load() != accepted.load() ||
                   race_context->terminate_calls.load() != expected_terminations ||
                   race_context->late_termination.load() || race_token->requestCancel())
-                return false;
+                return fail("check_11");
             }
 
             return registry_size() == registry_baseline;
