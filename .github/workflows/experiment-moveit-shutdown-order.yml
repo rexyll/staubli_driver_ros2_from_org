@@ -462,31 +462,31 @@ jobs:
                     response->message = "Pilz request did not enter active in-flight barrier";
                     return;
                   }
-                  std::fprintf(stderr, "[STAUBLI_REVERSE_CROSS] B_OMPL_CONTEXT_CREATED context=%p pipeline=%p\\\\n",
+                  std::fprintf(stderr, "[STAUBLI_REVERSE_CROSS] B_OMPL_CONTEXT_CREATED context=%p pipeline=%p\\n",
                                static_cast<const void*>(ompl_context.get()), static_cast<const void*>(ompl_pipeline.get()));
-                  std::fprintf(stderr, "[STAUBLI_REVERSE_CROSS] A_PILZ_CONTEXT_CREATED context=%p pipeline=%p\\\\n",
+                  std::fprintf(stderr, "[STAUBLI_REVERSE_CROSS] A_PILZ_CONTEXT_CREATED context=%p pipeline=%p\\n",
                                static_cast<const void*>(pilz_context.get()), static_cast<const void*>(pilz_pipeline.get()));
                   std::fflush(stderr);
                   const bool pilz_done_while_held = pilz_request_done.load();
                   const bool wrapper_result = moveit_cpp->terminatePlanningPipeline("pilz_industrial_motion_planner");
-                  std::fprintf(stderr, "[STAUBLI_REVERSE_CROSS] A_WRAPPER_RETURN result=%d\\\\n",
+                  std::fprintf(stderr, "[STAUBLI_REVERSE_CROSS] A_WRAPPER_RETURN result=%d\\n",
                                wrapper_result ? 1 : 0);
                   std::fflush(stderr);
                   const bool pilz_terminated = pilz_barrier->staubliContextTerminated();
                   const bool ompl_terminated = ompl_barrier->staubliContextTerminated();
                   std::fprintf(stderr,
-                               "[STAUBLI_REVERSE_PILZ] TERMINATE_OBSERVED context=%p terminated=%d solve_done=%d\\\\n",
+                               "[STAUBLI_REVERSE_PILZ] TERMINATE_OBSERVED context=%p terminated=%d solve_done=%d\\n",
                                static_cast<const void*>(pilz_context.get()), pilz_terminated ? 1 : 0,
                                pilz_done_while_held ? 1 : 0);
                   std::fprintf(stderr,
-                               "[STAUBLI_OMPL_INFLIGHT] TERMINATE_OBSERVED context=%p terminated=%d solve_done=0\\\\n",
+                               "[STAUBLI_OMPL_INFLIGHT] TERMINATE_OBSERVED context=%p terminated=%d solve_done=0\\n",
                                static_cast<const void*>(ompl_context.get()), ompl_terminated ? 1 : 0);
                   std::fflush(stderr);
                   pilz_barrier->releaseStaubliSolveBarrier();
                   ompl_barrier->releaseStaubliSolveBarrier();
-                  std::fprintf(stderr, "[STAUBLI_REVERSE_CROSS] RELEASE_PILZ context=%p\\\\n",
+                  std::fprintf(stderr, "[STAUBLI_REVERSE_CROSS] RELEASE_PILZ context=%p\\n",
                                static_cast<const void*>(pilz_context.get()));
-                  std::fprintf(stderr, "[STAUBLI_REVERSE_CROSS] RELEASE_OMPL context=%p\\\\n",
+                  std::fprintf(stderr, "[STAUBLI_REVERSE_CROSS] RELEASE_OMPL context=%p\\n",
                                static_cast<const void*>(ompl_context.get()));
                   std::fflush(stderr);
                   if (pilz_thread.joinable())
