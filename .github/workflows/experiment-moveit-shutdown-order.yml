@@ -3024,9 +3024,9 @@ jobs:
           pilz_terminate_calls = [line for line in lines if "[STAUBLI_PILZ_TERMINATE] " in line]
           if not all(len(items) == 1 for items in (
               cross_held, cross_context, cross_wrapper, cross_target, cross_control,
-              inflight_entered, inflight_terminated, inflight_released,
+              inflight_terminated, inflight_released,
               cross_client, cross_release
-          )) or len(pilz_terminate_calls) != 2:
+          )) or not inflight_entered or len(pilz_terminate_calls) != 2:
               raise SystemExit(
                   "Cross/reverse-pipeline markers missing/duplicated: "
                   f"held={len(cross_held)} context={len(cross_context)} wrapper={len(cross_wrapper)} "
@@ -3050,7 +3050,17 @@ jobs:
               raise SystemExit("Could not parse target Pilz context pointer.")
           terminated_ptr = re.search(r"context=(0x[0-9a-fA-F]+)", inflight_terminated[0])
           released_ptr = re.search(r"context=(0x[0-9a-fA-F]+)", inflight_released[0])
-          entered_ptr = re.search(r"context=(0x[0-9a-fA-F]+)", inflight_entered[0])
+          entered_for_target = [
+              line for line in inflight_entered
+              if (match := re.search(r"context=(0x[0-9a-fA-F]+)", line))
+              and match.group(1) == target_ptr.group(1)
+          ]
+          if len(entered_for_target) != 1:
+              raise SystemExit(
+                  "Expected exactly one SOLVE_ENTERED marker for the terminated target context; "
+                  f"target={target_ptr.group(1)} candidates={entered_for_target}"
+              )
+          entered_ptr = re.search(r"context=(0x[0-9a-fA-F]+)", entered_for_target[0])
           if not all((terminated_ptr, released_ptr, entered_ptr)) or any(
               item.group(1) != target_ptr.group(1) for item in (terminated_ptr, released_ptr, entered_ptr)
           ):
