@@ -1536,22 +1536,25 @@ jobs:
                 completed_context->late_termination.load() || registry_size() != registry_baseline)
               return false;
 
-            // Sticky cancellation must survive context creation that occurs after terminate().
+            // A cancellation received before solve starts must remain sticky without terminating an attached context.
             auto cancel_before_attach = std::make_shared<RequestToken>();
             auto late_context = std::make_shared<RecordingContext>("cancel-before-attach");
             if (!cancel_before_attach->requestCancel())
               return false;
             cancel_before_attach->attachContext(late_context);
+            const bool late_solve_started = cancel_before_attach->beginSolve();
             const bool late_finish_cancelled = cancel_before_attach->finish();
             late_context->finish_returned.store(true);
-            if (!late_finish_cancelled || late_context->terminate_calls.load() != 1 || late_context->late_termination.load() ||
+            if (late_solve_started || !late_finish_cancelled || late_context->terminate_calls.load() != 0 || late_context->late_termination.load() ||
                 cancel_before_attach->requestCancel())
               return false;
 
-            // Context attachment before cancellation must dispatch once, even for repeated terminate calls.
+            // Once solve has started, cancellation must dispatch terminate exactly once.
             auto attach_before_cancel = std::make_shared<RequestToken>();
             auto attached_context = std::make_shared<RecordingContext>("attach-before-cancel");
             attach_before_cancel->attachContext(attached_context);
+            if (!attach_before_cancel->beginSolve())
+              return false;
             const bool first_cancel = attach_before_cancel->requestCancel();
             const bool repeated_cancel = attach_before_cancel->requestCancel();
             const bool attached_finish_cancelled = attach_before_cancel->finish();
@@ -1566,6 +1569,8 @@ jobs:
             auto blocking_context = std::make_shared<RecordingContext>("finish-waits-for-terminate");
             blocking_context->block_termination.store(true);
             blocking_token->attachContext(blocking_context);
+            if (!blocking_token->beginSolve())
+              return false;
             std::atomic<bool> blocking_cancel_accepted{ false };
             std::thread cancel_thread([&]() {
               blocking_cancel_accepted.store(blocking_token->requestCancel());
@@ -1617,6 +1622,8 @@ jobs:
               auto race_token = std::make_shared<RequestToken>();
               auto race_context = std::make_shared<RecordingContext>("finish-cancel-race");
               race_token->attachContext(race_context);
+              if (!race_token->beginSolve())
+                return false;
               std::atomic<bool> start{ false };
               std::atomic<bool> accepted{ false };
               std::atomic<bool> finish_cancelled{ false };
@@ -1689,6 +1696,7 @@ jobs:
           if not (
               "RequestGuard request_guard{ this, request_token };" in pipeline_source
               and "request_token->attachContext(context);" in pipeline_source
+              and "request_token->beginSolve()" in pipeline_source
               and "request->requestCancel();" in pipeline_source
               and "active_requests_.empty()" in pipeline_source
               and "planner_pair.second->terminate()" not in pipeline_source
