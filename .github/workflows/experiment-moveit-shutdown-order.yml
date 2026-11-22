@@ -373,55 +373,135 @@ jobs:
                   const auto pipelines = moveit_cpp->getPlanningPipelines();
                   const auto ompl = pipelines.find("ompl");
                   const auto pilz = pipelines.find("pilz_industrial_motion_planner");
-                  const bool ompl_exists = ompl != pipelines.end() && ompl->second;
-                  const bool pilz_exists = pilz != pipelines.end() && pilz->second &&
-                                           !pilz->second->getPlannerPluginNames().empty();
-                  if (!ompl_exists || !pilz_exists)
+                  if (ompl == pipelines.end() || !ompl->second || pilz == pipelines.end() || !pilz->second)
                   {
                     response->success = false;
                     response->message = "precondition failed: OMPL and Pilz pipelines required";
                     return;
                   }
                   const auto ompl_pipeline = ompl->second;
-                  planning_interface::PlanningContextPtr target_context;
-                  planning_interface::StaubliSolveBarrierProbe* barrier = nullptr;
-                  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-                  while (std::chrono::steady_clock::now() < deadline)
+                  const auto pilz_pipeline = pilz->second;
+                  planning_interface::PlanningContextPtr ompl_context;
+                  planning_interface::StaubliSolveBarrierProbe* ompl_barrier = nullptr;
+                  const auto ompl_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+                  while (std::chrono::steady_clock::now() < ompl_deadline)
                   {
-                    target_context = ompl_pipeline->staubliTestLatestContext();
-                    barrier = target_context ?
-                        dynamic_cast<planning_interface::StaubliSolveBarrierProbe*>(target_context.get()) : nullptr;
-                    if (ompl_pipeline->isActive() && barrier && barrier->staubliSolveBarrierEntered())
+                    ompl_context = ompl_pipeline->staubliTestLatestContext();
+                    ompl_barrier = ompl_context ?
+                        dynamic_cast<planning_interface::StaubliSolveBarrierProbe*>(ompl_context.get()) : nullptr;
+                    if (ompl_pipeline->isActive() && ompl_barrier && ompl_barrier->staubliSolveBarrierEntered())
                       break;
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
                   }
                   const bool ompl_active = ompl_pipeline->isActive();
-                  const bool solve_entered = barrier && barrier->staubliSolveBarrierEntered();
-                  if (!ompl_active || !solve_entered)
+                  const bool ompl_solve_entered = ompl_barrier && ompl_barrier->staubliSolveBarrierEntered();
+                  if (!ompl_active || !ompl_solve_entered)
                   {
                     response->success = false;
                     response->message = "OMPL request did not enter active in-flight barrier";
                     return;
                   }
-                  std::fprintf(stderr, "[STAUBLI_REVERSE_CROSS] B_CONTEXT_CREATED context=%p pipeline=%p\\n",
-                               static_cast<const void*>(target_context.get()),
-                               static_cast<const void*>(ompl_pipeline.get()));
+                  const auto psm = moveit_cpp->getPlanningSceneMonitorNonConst();
+                  const auto scene = psm ? psm->getPlanningScene() : nullptr;
+                  if (!scene)
+                  {
+                    ompl_barrier->releaseStaubliSolveBarrier();
+                    response->success = false;
+                    response->message = "PlanningScene unavailable";
+                    return;
+                  }
+                  planning_interface::MotionPlanRequest pilz_request;
+                  pilz_request.group_name = "arm";
+                  pilz_request.planner_id = "PTP";
+                  pilz_request.allowed_planning_time = 7.738;
+                  pilz_request.num_planning_attempts = 1;
+                  pilz_request.start_state.is_diff = true;
+                  pilz_request.max_velocity_scaling_factor = 0.5;
+                  pilz_request.max_acceleration_scaling_factor = 0.5;
+                  moveit_msgs::msg::Constraints pilz_goal;
+                  const double target_positions[] = { 0.11, 0.21, 0.31, 0.41, 0.51, 0.61 };
+                  for (std::size_t index = 0; index < 6; ++index)
+                  {
+                    moveit_msgs::msg::JointConstraint joint;
+                    joint.joint_name = "joint_" + std::to_string(index + 1);
+                    joint.position = target_positions[index];
+                    joint.tolerance_above = 0.05;
+                    joint.tolerance_below = 0.05;
+                    joint.weight = 1.0;
+                    pilz_goal.joint_constraints.push_back(joint);
+                  }
+                  pilz_request.goal_constraints.push_back(pilz_goal);
+                  std::atomic_bool pilz_request_done{ false };
+                  planning_interface::MotionPlanResponse pilz_response;
+                  std::thread pilz_thread([pilz_pipeline, scene, pilz_request, &pilz_response, &pilz_request_done]() {
+                    pilz_pipeline->generatePlan(scene, pilz_request, pilz_response);
+                    pilz_request_done.store(true);
+                  });
+                  planning_interface::PlanningContextPtr pilz_context;
+                  planning_interface::StaubliSolveBarrierProbe* pilz_barrier = nullptr;
+                  const auto pilz_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+                  while (std::chrono::steady_clock::now() < pilz_deadline)
+                  {
+                    pilz_context = pilz_pipeline->staubliTestLatestContext();
+                    pilz_barrier = pilz_context ?
+                        dynamic_cast<planning_interface::StaubliSolveBarrierProbe*>(pilz_context.get()) : nullptr;
+                    if (pilz_pipeline->isActive() && pilz_barrier && pilz_barrier->staubliSolveBarrierEntered())
+                      break;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                  }
+                  const bool pilz_active = pilz_pipeline->isActive();
+                  const bool pilz_solve_entered = pilz_barrier && pilz_barrier->staubliSolveBarrierEntered();
+                  if (!pilz_active || !pilz_solve_entered)
+                  {
+                    if (pilz_barrier)
+                      pilz_barrier->releaseStaubliSolveBarrier();
+                    ompl_barrier->releaseStaubliSolveBarrier();
+                    if (pilz_thread.joinable())
+                      pilz_thread.join();
+                    response->success = false;
+                    response->message = "Pilz request did not enter active in-flight barrier";
+                    return;
+                  }
+                  std::fprintf(stderr, "[STAUBLI_REVERSE_CROSS] B_OMPL_CONTEXT_CREATED context=%p pipeline=%p\\\\n",
+                               static_cast<const void*>(ompl_context.get()), static_cast<const void*>(ompl_pipeline.get()));
+                  std::fprintf(stderr, "[STAUBLI_REVERSE_CROSS] A_PILZ_CONTEXT_CREATED context=%p pipeline=%p\\\\n",
+                               static_cast<const void*>(pilz_context.get()), static_cast<const void*>(pilz_pipeline.get()));
                   std::fflush(stderr);
+                  const bool pilz_done_while_held = pilz_request_done.load();
                   const bool wrapper_result = moveit_cpp->terminatePlanningPipeline("pilz_industrial_motion_planner");
-                  std::fprintf(stderr, "[STAUBLI_REVERSE_CROSS] A_WRAPPER_RETURN result=%d\\n",
+                  std::fprintf(stderr, "[STAUBLI_REVERSE_CROSS] A_WRAPPER_RETURN result=%d\\\\n",
                                wrapper_result ? 1 : 0);
                   std::fflush(stderr);
-                  const bool terminated = barrier->staubliContextTerminated();
+                  const bool pilz_terminated = pilz_barrier->staubliContextTerminated();
+                  const bool ompl_terminated = ompl_barrier->staubliContextTerminated();
                   std::fprintf(stderr,
-                               "[STAUBLI_OMPL_INFLIGHT] TERMINATE_OBSERVED context=%p terminated=%d solve_done=0\\n",
-                               static_cast<const void*>(target_context.get()), terminated ? 1 : 0);
-                  barrier->releaseStaubliSolveBarrier();
-                  std::fprintf(stderr, "[STAUBLI_REVERSE_CROSS] RELEASE context=%p\\n",
-                               static_cast<const void*>(target_context.get()));
+                               "[STAUBLI_REVERSE_PILZ] TERMINATE_OBSERVED context=%p terminated=%d solve_done=%d\\\\n",
+                               static_cast<const void*>(pilz_context.get()), pilz_terminated ? 1 : 0,
+                               pilz_done_while_held ? 1 : 0);
+                  std::fprintf(stderr,
+                               "[STAUBLI_OMPL_INFLIGHT] TERMINATE_OBSERVED context=%p terminated=%d solve_done=0\\\\n",
+                               static_cast<const void*>(ompl_context.get()), ompl_terminated ? 1 : 0);
                   std::fflush(stderr);
-                  response->success = ompl_active && pilz_exists && wrapper_result && solve_entered && !terminated;
-                  response->message = "ompl_active=1 pilz_exists=1 wrapper=" + std::to_string(wrapper_result) +
-                                      " solve_entered=1 terminated=" + std::to_string(terminated);
+                  pilz_barrier->releaseStaubliSolveBarrier();
+                  ompl_barrier->releaseStaubliSolveBarrier();
+                  std::fprintf(stderr, "[STAUBLI_REVERSE_CROSS] RELEASE_PILZ context=%p\\\\n",
+                               static_cast<const void*>(pilz_context.get()));
+                  std::fprintf(stderr, "[STAUBLI_REVERSE_CROSS] RELEASE_OMPL context=%p\\\\n",
+                               static_cast<const void*>(ompl_context.get()));
+                  std::fflush(stderr);
+                  if (pilz_thread.joinable())
+                    pilz_thread.join();
+                  const bool pilz_failed =
+                      pilz_response.error_code.val != moveit_msgs::msg::MoveItErrorCodes::SUCCESS;
+                  response->success = ompl_active && pilz_active && wrapper_result && ompl_solve_entered &&
+                                      pilz_solve_entered && !pilz_done_while_held && pilz_terminated &&
+                                      !ompl_terminated && pilz_failed;
+                  response->message =
+                      "ompl_active=1 pilz_active=1 wrapper=" + std::to_string(wrapper_result) +
+                      " ompl_solve_entered=1 pilz_solve_entered=1 pilz_terminated=" +
+                      std::to_string(pilz_terminated) + " ompl_terminated=" + std::to_string(ompl_terminated) +
+                      " pilz_done_while_held=" + std::to_string(pilz_done_while_held) +
+                      " pilz_failure=" + std::to_string(pilz_failed);
                 }, rmw_qos_profile_services_default, staubli_probe_callback_group);
           }
           '''
@@ -1074,6 +1154,10 @@ jobs:
                 staubli_terminate_probe_enabled && staubli_reverse_cross_env != nullptr &&
                 staubli_reverse_cross_env[0] == '1' && staubli_reverse_cross_env[1] == '\\0' &&
                 std::fabs(req.allowed_planning_time - 7.737) < 1e-9;
+            const bool staubli_probe_reverse_pilz =
+                staubli_terminate_probe_enabled && staubli_reverse_cross_env != nullptr &&
+                staubli_reverse_cross_env[0] == '1' && staubli_reverse_cross_env[1] == '\\0' &&
+                std::fabs(req.allowed_planning_time - 7.738) < 1e-9;
 
             static std::mutex staubli_probe_mutex;
             static std::condition_variable staubli_probe_cv;
@@ -1331,13 +1415,18 @@ jobs:
               if (barrier)
                 barrier->armStaubliSolveBarrier();
             }
-            if (staubli_probe_reverse_cross)
+            if (staubli_probe_reverse_cross || staubli_probe_reverse_pilz)
             {
               auto* barrier = dynamic_cast<planning_interface::StaubliSolveBarrierProbe*>(context.get());
               if (!barrier)
-                throw std::runtime_error("OMPL context does not expose reverse CI solve barrier");
+                throw std::runtime_error("Planning context does not expose reverse CI solve barrier");
               barrier->armStaubliSolveBarrier();
-              std::fprintf(stderr, "[STAUBLI_REVERSE_CROSS] B_OMPL_ARMED context=%p\\n", static_cast<const void*>(context.get()));
+              if (staubli_probe_reverse_cross)
+                std::fprintf(stderr, "[STAUBLI_REVERSE_CROSS] B_OMPL_ARMED context=%p\\n",
+                             static_cast<const void*>(context.get()));
+              else
+                std::fprintf(stderr, "[STAUBLI_REVERSE_CROSS] A_PILZ_ARMED context=%p\\n",
+                             static_cast<const void*>(context.get()));
               std::fflush(stderr);
             }
             // Run planner
@@ -2368,16 +2457,19 @@ jobs:
                   self.assertIsNotNone(terminate_response)
                   self.assertTrue(terminate_response.success, terminate_response.message)
                   self.assertIn("ompl_active=1", terminate_response.message)
-                  self.assertIn("pilz_exists=1", terminate_response.message)
+                  self.assertIn("pilz_active=1", terminate_response.message)
                   self.assertIn("wrapper=1", terminate_response.message)
-                  self.assertIn("solve_entered=1", terminate_response.message)
-                  self.assertIn("terminated=0", terminate_response.message)
+                  self.assertIn("ompl_solve_entered=1", terminate_response.message)
+                  self.assertIn("pilz_solve_entered=1", terminate_response.message)
+                  self.assertIn("pilz_terminated=1", terminate_response.message)
+                  self.assertIn("ompl_terminated=0", terminate_response.message)
+                  self.assertIn("pilz_done_while_held=0", terminate_response.message)
                   rclpy.spin_until_future_complete(self.node, plan_future, timeout_sec=120.0)
                   self.assertTrue(plan_future.done(), "OMPL request did not resume after Pilz-only terminate")
                   plan_response = plan_future.result()
                   self.assertEqual(plan_response.motion_plan_response.error_code.val, MoveItErrorCodes.SUCCESS)
                   self.assertTrue(plan_response.motion_plan_response.trajectory.joint_trajectory.points)
-                  print("[STAUBLI_REVERSE_CROSS_PIPELINE_CLIENT] PASS pilz_terminate=1 ompl_inflight=SUCCESS target_unterminated=1")
+                  print("[STAUBLI_REVERSE_CROSS_PIPELINE_CLIENT] PASS pilz_inflight_terminated=1 ompl_inflight=SUCCESS target_unterminated=1")
           '''
 
           method = '''
@@ -2844,58 +2936,84 @@ jobs:
           inflight_released = [line for line in lines if "[STAUBLI_PILZ_INFLIGHT] SOLVE_RELEASED " in line]
           cross_client = [line for line in lines if "[STAUBLI_CROSS_PIPELINE_CLIENT] PASS " in line]
           reverse_armed = [line for line in lines if "[STAUBLI_REVERSE_CROSS] B_OMPL_ARMED " in line]
-          reverse_context = [line for line in lines if "[STAUBLI_REVERSE_CROSS] B_CONTEXT_CREATED " in line]
+          reverse_ompl_context = [line for line in lines if "[STAUBLI_REVERSE_CROSS] B_OMPL_CONTEXT_CREATED " in line]
+          reverse_pilz_context = [line for line in lines if "[STAUBLI_REVERSE_CROSS] A_PILZ_CONTEXT_CREATED " in line]
           reverse_wrapper = [line for line in lines if "[STAUBLI_REVERSE_CROSS] A_WRAPPER_RETURN " in line]
           reverse_observed = [line for line in lines if "[STAUBLI_OMPL_INFLIGHT] TERMINATE_OBSERVED " in line]
-          reverse_released = [line for line in lines if "[STAUBLI_REVERSE_CROSS] RELEASE " in line]
+          reverse_pilz_observed = [line for line in lines if "[STAUBLI_REVERSE_PILZ] TERMINATE_OBSERVED " in line]
+          reverse_ompl_released = [line for line in lines if "[STAUBLI_REVERSE_CROSS] RELEASE_OMPL " in line]
+          reverse_pilz_released = [line for line in lines if "[STAUBLI_REVERSE_CROSS] RELEASE_PILZ " in line]
           reverse_client = [line for line in lines if "[STAUBLI_REVERSE_CROSS_PIPELINE_CLIENT] PASS " in line]
           if not all(len(items) == 1 for items in (
-              reverse_armed, reverse_context, reverse_wrapper, reverse_observed, reverse_released, reverse_client
+              reverse_armed, reverse_ompl_context, reverse_pilz_context, reverse_wrapper,
+              reverse_observed, reverse_pilz_observed, reverse_ompl_released, reverse_pilz_released, reverse_client
           )):
               raise SystemExit(
-                  "Reverse Pilz->OMPL isolation markers missing/duplicated: "
-                  f"armed={len(reverse_armed)} context={len(reverse_context)} wrapper={len(reverse_wrapper)} "
-                  f"observed={len(reverse_observed)} released={len(reverse_released)} client={len(reverse_client)}"
+                  "Reverse live-Pilz/OMPL isolation markers missing/duplicated: "
+                  f"armed={len(reverse_armed)} ompl_context={len(reverse_ompl_context)} "
+                  f"pilz_context={len(reverse_pilz_context)} wrapper={len(reverse_wrapper)} "
+                  f"ompl_observed={len(reverse_observed)} pilz_observed={len(reverse_pilz_observed)} "
+                  f"ompl_released={len(reverse_ompl_released)} pilz_released={len(reverse_pilz_released)} "
+                  f"client={len(reverse_client)}"
               )
-          reverse_ptrs = [
+          reverse_ompl_ptrs = [
               re.search(r"context=(0x[0-9a-fA-F]+)", line)
-              for line in (reverse_armed[0], reverse_context[0], reverse_observed[0], reverse_released[0])
+              for line in (reverse_armed[0], reverse_ompl_context[0], reverse_observed[0], reverse_ompl_released[0])
           ]
-          if any(ptr is None for ptr in reverse_ptrs) or len({ptr.group(1) for ptr in reverse_ptrs}) != 1:
+          if any(ptr is None for ptr in reverse_ompl_ptrs) or len({ptr.group(1) for ptr in reverse_ompl_ptrs}) != 1:
               raise SystemExit("Reverse OMPL context pointer mismatch across arm/create/observe/release.")
+          reverse_pilz_ptrs = [
+              re.search(r"context=(0x[0-9a-fA-F]+)", line)
+              for line in (reverse_pilz_context[0], reverse_pilz_observed[0], reverse_pilz_released[0])
+          ]
+          if any(ptr is None for ptr in reverse_pilz_ptrs) or len({ptr.group(1) for ptr in reverse_pilz_ptrs}) != 1:
+              raise SystemExit("Reverse Pilz context pointer mismatch across create/terminate-observe/release.")
+          if reverse_ompl_ptrs[0].group(1) == reverse_pilz_ptrs[0].group(1):
+              raise SystemExit("Reverse isolation target contexts unexpectedly share one pointer.")
           if not (
               "result=1" in reverse_wrapper[0]
               and "terminated=0" in reverse_observed[0]
               and "solve_done=0" in reverse_observed[0]
-              and "pilz_terminate=1" in reverse_client[0]
+              and "terminated=1" in reverse_pilz_observed[0]
+              and "solve_done=0" in reverse_pilz_observed[0]
+              and "pilz_inflight_terminated=1" in reverse_client[0]
               and "ompl_inflight=SUCCESS" in reverse_client[0]
               and "target_unterminated=1" in reverse_client[0]
           ):
               raise SystemExit(
-                  "Reverse pipeline isolation assertion failed: "
-                  f"wrapper={reverse_wrapper}, observed={reverse_observed}, client={reverse_client}"
+                  "Reverse live-Pilz/OMPL isolation assertion failed: "
+                  f"wrapper={reverse_wrapper}, ompl={reverse_observed}, pilz={reverse_pilz_observed}, client={reverse_client}"
               )
           reverse_order = [
-              lines.index(reverse_armed[0]), lines.index(reverse_context[0]), lines.index(reverse_wrapper[0]),
-              lines.index(reverse_observed[0]), lines.index(reverse_released[0]), lines.index(reverse_client[0])
+              lines.index(reverse_armed[0]), lines.index(reverse_ompl_context[0]), lines.index(reverse_pilz_context[0]),
+              lines.index(reverse_wrapper[0]), lines.index(reverse_pilz_observed[0]), lines.index(reverse_observed[0]),
+              lines.index(reverse_pilz_released[0]), lines.index(reverse_ompl_released[0]), lines.index(reverse_client[0])
           ]
           if reverse_order != sorted(reverse_order):
-              raise SystemExit(f"Reverse pipeline isolation event order invalid: {reverse_order}")
+              raise SystemExit(f"Reverse live-Pilz/OMPL isolation event order invalid: {reverse_order}")
           cross_release = [line for line in lines if "[STAUBLI_CROSS_PIPELINE] RELEASE signal=1" in line]
           pilz_terminate_calls = [line for line in lines if "[STAUBLI_PILZ_TERMINATE] " in line]
           if not all(len(items) == 1 for items in (
               cross_held, cross_context, cross_wrapper, cross_target, cross_control,
               inflight_entered, inflight_terminated, inflight_released,
               cross_client, cross_release
-          )) or pilz_terminate_calls:
+          )) or len(pilz_terminate_calls) != 2:
               raise SystemExit(
-                  "Cross-pipeline markers missing/duplicated: "
+                  "Cross/reverse-pipeline markers missing/duplicated: "
                   f"held={len(cross_held)} context={len(cross_context)} wrapper={len(cross_wrapper)} "
                   f"inflight_entered={len(inflight_entered)} inflight_terminated={len(inflight_terminated)} "
                   f"inflight_released={len(inflight_released)} target={len(cross_target)} "
                   f"control={len(cross_control)} client={len(cross_client)} release={len(cross_release)} "
                   f"unexpected_pilz_terminate={len(pilz_terminate_calls)}"
               )
+          pilz_terminate_ptrs = [
+              re.search(r"this=(0x[0-9a-fA-F]+) (?:before=0|after=1)", line)
+              for line in pilz_terminate_calls
+          ]
+          if any(ptr is None for ptr in pilz_terminate_ptrs) or len({ptr.group(1) for ptr in pilz_terminate_ptrs}) != 1:
+              raise SystemExit("Expected exactly one real Pilz context terminate before/after pair.")
+          if pilz_terminate_ptrs[0].group(1) != reverse_pilz_ptrs[0].group(1):
+              raise SystemExit("Pilz terminate() was not invoked on the in-flight reverse-test context.")
           if not re.search(r"active=1", cross_held[0]) or not re.search(r"active_before=1 result=1", cross_wrapper[0]):
               raise SystemExit(f"OMPL was not active at terminate: held={cross_held}, wrapper={cross_wrapper}")
           target_ptr = re.search(r"context=(0x[0-9a-fA-F]+)", cross_context[0])
@@ -2921,10 +3039,10 @@ jobs:
                   "Pilz in-flight/after-terminate/negative-control state mismatch: "
                   f"inflight={inflight_terminated}/{inflight_released}, target={cross_target}, control={cross_control}"
               )
-          if len(terminate_entries) != 3:
+          if len(terminate_entries) != 4:
               raise SystemExit(
-                  "Expected exactly three actual PlanningPipeline::terminate entries "
-                  "(cross-pipeline, one-active-request overlap, and two-active-token scenarios), "
+                  "Expected exactly four actual PlanningPipeline::terminate entries "
+                  "(cross-pipeline, one-active-request overlap, two-active-token, and reverse live-Pilz scenarios), "
                   f"got {terminate_entries}"
               )
           # The regression deliberately invokes terminate once in each independent scenario.
