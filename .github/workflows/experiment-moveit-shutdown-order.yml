@@ -1283,7 +1283,9 @@ jobs:
             }"""
           # Register before publishing active=true so terminate cannot miss an entering request.
           pipeline_source = pipeline_source.replace(
-              active_anchor, request_setup + "\n" + active_anchor + "\n" + probe_code, 1
+              active_anchor,
+              request_setup + "\n  // Active state is derived from the mutex-protected request registry.\n" + probe_code,
+              1
           )
           exit_anchor = """  // Set planning pipeline to inactive
             active_ = false;
@@ -1524,7 +1526,6 @@ jobs:
           {
             std::lock_guard<std::mutex> lock(active_requests_mutex_);
             active_requests_.push_back(token);
-            active_ = true;
           }
 
           void PlanningPipeline::unregisterActiveRequest(const std::shared_ptr<RequestToken>& token) const
@@ -1532,7 +1533,6 @@ jobs:
             std::lock_guard<std::mutex> lock(active_requests_mutex_);
             active_requests_.erase(
                 std::remove(active_requests_.begin(), active_requests_.end(), token), active_requests_.end());
-            active_ = !active_requests_.empty();
           }
 
           std::size_t PlanningPipeline::staubliTestActiveRequestCount() const
@@ -1754,8 +1754,12 @@ jobs:
           generate_body = pipeline_source[generate_start:terminate_start]
           if "auto finalize_request = [&](bool success)" not in generate_body:
               raise SystemExit("Request completion finalizer was not injected into generatePlan.")
-          if generate_body.index("registerActiveRequest(request_token);") > generate_body.index("active_ = true;"):
-              raise SystemExit("Request token registration must precede the first active=true publication.")
+          if generate_body.index("registerActiveRequest(request_token);") > generate_body.index(
+              "// CI-only deterministic probe"
+          ):
+              raise SystemExit("Request token registration must precede the active-probe body.")
+          if "active_ = true;" in generate_body or "active_ = false;" in generate_body:
+              raise SystemExit("Legacy unsynchronized active_ writes remain in generatePlan.")
           generate_body = generate_body.replace("return false;", "return finalize_request(false);")
           generate_body = generate_body.replace(
               "return static_cast<bool>(res);", "return finalize_request(static_cast<bool>(res));"
