@@ -1046,6 +1046,7 @@ jobs:
               {
                 std::unique_lock<std::mutex> lock(mutex);
                 completed = true;
+                solve_in_flight = false;
                 condition.wait(lock, [this]() { return !terminate_in_flight; });
                 const bool cancelled = cancel_requested;
                 context.reset();
@@ -1276,7 +1277,7 @@ jobs:
                 std::fflush(stderr);
               }
             }"""
-          # Register before publishing active=true so terminate cannot miss an entering request.
+          # Register each request before the probe body so terminate cannot miss an entering request.
           pipeline_source = pipeline_source.replace(
               active_anchor,
               request_setup + "\n  // Active state is derived from the mutex-protected request registry.\n" + probe_code,
@@ -1728,7 +1729,7 @@ jobs:
               auto race_context = std::make_shared<RecordingContext>("finish-cancel-race");
               race_token->attachContext(race_context);
               if (!race_token->beginSolve())
-                return fail("check_11");
+                return fail("check_12");
               std::atomic<bool> start{ false };
               std::atomic<bool> accepted{ false };
               std::atomic<bool> finish_cancelled{ false };
@@ -1750,7 +1751,7 @@ jobs:
               if (finish_cancelled.load() != accepted.load() ||
                   race_context->terminate_calls.load() != expected_terminations ||
                   race_context->late_termination.load() || race_token->requestCancel())
-                return fail("check_12");
+                return fail("check_13");
             }
 
             return registry_size() == registry_baseline;
@@ -1781,7 +1782,7 @@ jobs:
           ):
               raise SystemExit("Request token registration must precede the active-probe body.")
           if "active_ = true;" in generate_body or "active_ = false;" in generate_body:
-              raise SystemExit("Legacy unsynchronized active_ writes remain in generatePlan.")
+              raise SystemExit("Redundant legacy active_ writes remain alongside the request registry.")
           generate_body = generate_body.replace("return false;", "return finalize_request(false);")
           generate_body = generate_body.replace(
               "return static_cast<bool>(res);", "return finalize_request(static_cast<bool>(res));"
