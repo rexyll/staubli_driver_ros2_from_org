@@ -1480,7 +1480,7 @@ jobs:
             const auto fail = [](const char* reason) {
               std::fprintf(stderr, "[STAUBLI_TOKEN_LIFECYCLE] fail=%s\\n", reason);
               std::fflush(stderr);
-              return fail("check_1");
+              return false;
             };
             class RecordingContext final : public planning_interface::PlanningContext
             {
