@@ -1190,7 +1190,7 @@ jobs:
             {
               node_->set_parameter(rclcpp::Parameter("staubli_test_cross_pipeline_held", true));
               std::fprintf(stderr, "[STAUBLI_CROSS_PIPELINE] A_OMPL_HELD pipeline=%p active=%d\\n",
-                           static_cast<const void*>(this), active_.load() ? 1 : 0);
+                           static_cast<const void*>(this), isActive() ? 1 : 0);
               std::fflush(stderr);
               bool release_cross_pipeline = false;
               const auto cross_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
@@ -1201,7 +1201,7 @@ jobs:
                   std::this_thread::sleep_for(std::chrono::milliseconds(10));
               }
               std::fprintf(stderr, "[STAUBLI_CROSS_PIPELINE] A_OMPL_RELEASED released=%d active=%d\\n",
-                           release_cross_pipeline ? 1 : 0, active_.load() ? 1 : 0);
+                           release_cross_pipeline ? 1 : 0, isActive() ? 1 : 0);
               std::fflush(stderr);
               if (!release_cross_pipeline)
               {
