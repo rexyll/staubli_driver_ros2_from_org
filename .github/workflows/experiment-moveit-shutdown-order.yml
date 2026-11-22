@@ -940,22 +940,11 @@ jobs:
 
               bool beginSolve()
               {
-                planning_interface::PlanningContextPtr value;
-                {
-                  std::lock_guard<std::mutex> lock(mutex);
-                  if (completed)
-                    return false;
-                  solve_started = true;
-                  if (cancel_requested && context && !terminate_dispatched)
-                  {
-                    terminate_dispatched = true;
-                    terminate_in_flight = true;
-                    value = context;
-                  }
-                }
-                if (value)
-                  dispatchTermination(value);
-                return !isCancelled();
+                std::lock_guard<std::mutex> lock(mutex);
+                if (completed || cancel_requested)
+                  return false;
+                solve_started = true;
+                return true;
               }
 
               bool requestCancel()
