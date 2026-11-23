@@ -23,7 +23,7 @@ jobs:
       - name: Install PAL Statistics baseline and build tooling
         shell: bash
         run: |
-          set -euo pipefail
+          set -eo pipefail
           apt-get update
           apt-get install -y git python3-colcon-common-extensions python3-rosdep ros-jazzy-pal-statistics ros-jazzy-pal-statistics-msgs
           source /opt/ros/jazzy/setup.bash
@@ -41,7 +41,7 @@ jobs:
       - name: Build a minimal StatisticsRegistry shutdown probe against the installed binary
         shell: bash
         run: |
-          set -euo pipefail
+          set -eo pipefail
           mkdir -p /tmp/pal_probe_baseline/src/pal_shutdown_probe
           cat > /tmp/pal_probe_baseline/src/pal_shutdown_probe/package.xml <<'EOF'
           <?xml version="1.0"?>
@@ -111,7 +111,7 @@ jobs:
       - name: Patch PAL Statistics 2.8.2 in a temporary overlay and rebuild the probe
         shell: bash
         run: |
-          set -euo pipefail
+          set -eo pipefail
           source /opt/ros/jazzy/setup.bash
           git clone --depth 1 --branch 2.8.2 https://github.com/pal-robotics/pal_statistics.git /tmp/pal_statistics_src
           rosdep install --from-paths /tmp/pal_statistics_src/pal_statistics --ignore-src --rosdistro jazzy -y
