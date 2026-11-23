@@ -3050,9 +3050,22 @@ jobs:
               raise SystemExit("Could not parse target Pilz context pointer.")
           terminated_ptr = re.search(r"context=(0x[0-9a-fA-F]+)", inflight_terminated[0])
           released_ptr = re.search(r"context=(0x[0-9a-fA-F]+)", inflight_released[0])
+          # Allocators may reuse a freed PlanningContext address in the later
+          # reverse-direction scenario. Scope SOLVE_ENTERED to the forward
+          # cross-pipeline interval before matching the pointer.
+          cross_phase_start = next(
+              i for i, line in enumerate(lines)
+              if "[STAUBLI_CROSS_PIPELINE] A_OMPL_HELD " in line
+          )
+          reverse_phase_start = next(
+              i for i, line in enumerate(lines)
+              if "[STAUBLI_REVERSE_CROSS] B_OMPL_ARMED " in line
+          )
           entered_for_target = [
-              line for line in inflight_entered
-              if (match := re.search(r"context=(0x[0-9a-fA-F]+)", line))
+              line for i, line in enumerate(lines)
+              if cross_phase_start < i < reverse_phase_start
+              and "[STAUBLI_PILZ_INFLIGHT] SOLVE_ENTERED " in line
+              and (match := re.search(r"context=(0x[0-9a-fA-F]+)", line))
               and match.group(1) == target_ptr.group(1)
           ]
           if len(entered_for_target) != 1:
