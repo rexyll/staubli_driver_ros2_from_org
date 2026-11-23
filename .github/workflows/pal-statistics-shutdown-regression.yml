@@ -1,0 +1,154 @@
+name: PAL statistics shutdown regression
+
+on:
+  push:
+    branches:
+      - "experiment/moveit-main-owner-lifetime-only"
+
+permissions:
+  contents: read
+
+jobs:
+  pal-statistics-context-shutdown:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container:
+      image: rostooling/setup-ros-docker:ubuntu-noble-latest
+    steps:
+      - name: Set up ROS Jazzy
+        uses: ros-tooling/setup-ros@v0.7
+        with:
+          required-ros-distributions: jazzy
+
+      - name: Install PAL Statistics baseline and build tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y git python3-colcon-common-extensions python3-rosdep ros-jazzy-pal-statistics ros-jazzy-pal-statistics-msgs
+          source /opt/ros/jazzy/setup.bash
+          for attempt in 1 2 3 4 5; do
+            if rosdep update --rosdistro jazzy; then
+              echo "rosdep update succeeded on attempt ${attempt}"
+              exit 0
+            fi
+            echo "rosdep update attempt ${attempt}/5 failed; retrying"
+            if [ "${attempt}" -lt 5 ]; then sleep 8; fi
+          done
+          echo "rosdep update failed after five attempts."
+          exit 1
+
+      - name: Build a minimal StatisticsRegistry shutdown probe against the installed binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/pal_probe_baseline/src/pal_shutdown_probe
+          cat > /tmp/pal_probe_baseline/src/pal_shutdown_probe/package.xml <<'EOF'
+          <?xml version="1.0"?>
+          <package format="3">
+            <name>pal_shutdown_probe</name>
+            <version>0.0.1</version>
+            <description>Minimal PAL Statistics shutdown regression probe</description>
+            <maintainer email="ci@example.invalid">CI</maintainer>
+            <license>Apache-2.0</license>
+            <buildtool_depend>ament_cmake</buildtool_depend>
+            <depend>rclcpp</depend>
+            <depend>pal_statistics</depend>
+            <export><build_type>ament_cmake</build_type></export>
+          </package>
+          EOF
+          cat > /tmp/pal_probe_baseline/src/pal_shutdown_probe/CMakeLists.txt <<'EOF'
+          cmake_minimum_required(VERSION 3.16)
+          project(pal_shutdown_probe)
+          find_package(ament_cmake REQUIRED)
+          find_package(rclcpp REQUIRED)
+          find_package(pal_statistics REQUIRED)
+          add_executable(pal_shutdown_probe src/main.cpp)
+          ament_target_dependencies(pal_shutdown_probe rclcpp pal_statistics)
+          install(TARGETS pal_shutdown_probe DESTINATION lib/${PROJECT_NAME})
+          ament_package()
+          EOF
+          mkdir -p /tmp/pal_probe_baseline/src/pal_shutdown_probe/src
+          cat > /tmp/pal_probe_baseline/src/pal_shutdown_probe/src/main.cpp <<'EOF'
+          #include <chrono>
+          #include <memory>
+          #include <thread>
+          #include "pal_statistics/pal_statistics.hpp"
+          #include "rclcpp/rclcpp.hpp"
+
+          int main(int argc, char ** argv)
+          {
+            rclcpp::init(argc, argv);
+            auto node = std::make_shared<rclcpp::Node>("pal_stats_shutdown_probe");
+            auto registry = std::make_shared<pal_statistics::StatisticsRegistry>(node, "/pal_shutdown_probe");
+            registry->startPublishThread();
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            rclcpp::shutdown();
+            registry.reset();
+            node.reset();
+            return 0;
+          }
+          EOF
+          source /opt/ros/jazzy/setup.bash
+          colcon build --base-paths /tmp/pal_probe_baseline/src --build-base /tmp/pal_probe_baseline/build --install-base /tmp/pal_probe_baseline/install --packages-select pal_shutdown_probe
+          source /tmp/pal_probe_baseline/install/setup.bash
+          set +e
+          timeout 15s ros2 run pal_shutdown_probe pal_shutdown_probe > /tmp/pal-baseline.log 2>&1
+          status=$?
+          set -e
+          cat /tmp/pal-baseline.log
+          if [ "${status}" -ne 0 ]; then
+            echo "Baseline probe exited unexpectedly: ${status}"
+            exit 1
+          fi
+          error_count=$(grep -F -c "context cannot be slept with because it's invalid" /tmp/pal-baseline.log || true)
+          if [ "${error_count}" -lt 1 ]; then
+            echo "Expected the installed PAL Statistics 2.8.2 baseline to reproduce the shutdown error."
+            exit 1
+          fi
+          echo "BASELINE_REPRODUCED errors=${error_count} exit=${status}"
+
+      - name: Patch PAL Statistics 2.8.2 in a temporary overlay and rebuild the probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          source /opt/ros/jazzy/setup.bash
+          git clone --depth 1 --branch 2.8.2 https://github.com/pal-robotics/pal_statistics.git /tmp/pal_statistics_src
+          rosdep install --from-paths /tmp/pal_statistics_src/pal_statistics --ignore-src --rosdistro jazzy -y
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("/tmp/pal_statistics_src/pal_statistics/src/pal_statistics.cpp")
+          source = path.read_text()
+          old = "      while (!is_data_ready_ && !interrupt_thread_) {"
+          new = "      while (!is_data_ready_ && !interrupt_thread_ && rclcpp::ok()) {"
+          if source.count(old) != 1:
+              raise SystemExit("Expected exactly one PAL Statistics 2.8.2 inner wait-loop anchor.")
+          source = source.replace(old, new, 1)
+          if source.count(new) != 1:
+              raise SystemExit("PAL Statistics shutdown guard patch did not validate.")
+          path.write_text(source)
+          print("Applied only the Context-state guard to the temporary PAL Statistics 2.8.2 source overlay.")
+          PY
+          colcon build --base-paths /tmp/pal_statistics_src/pal_statistics --build-base /tmp/pal_overlay_build --install-base /tmp/pal_overlay_install --packages-select pal_statistics --cmake-args -DBUILD_TESTING=OFF
+
+          mkdir -p /tmp/pal_probe_patched/src
+          cp -a /tmp/pal_probe_baseline/src/pal_shutdown_probe /tmp/pal_probe_patched/src/
+          source /tmp/pal_overlay_install/setup.bash
+          colcon build --base-paths /tmp/pal_probe_patched/src --build-base /tmp/pal_probe_patched/build --install-base /tmp/pal_probe_patched/install --packages-select pal_shutdown_probe
+          source /tmp/pal_probe_patched/install/setup.bash
+          test "$(ros2 pkg prefix pal_statistics)" = "/tmp/pal_overlay_install/pal_statistics"
+          set +e
+          timeout 15s ros2 run pal_shutdown_probe pal_shutdown_probe > /tmp/pal-patched.log 2>&1
+          status=$?
+          set -e
+          cat /tmp/pal-patched.log
+          if [ "${status}" -ne 0 ]; then
+            echo "Patched probe exited unexpectedly: ${status}"
+            exit 1
+          fi
+          if grep -Fq "context cannot be slept with because it's invalid" /tmp/pal-patched.log; then
+            echo "Patched PAL Statistics still emitted the Context-invalid shutdown error."
+            exit 1
+          fi
+          echo "PATCHED_SHUTDOWN_CLEAN exit=${status}"
