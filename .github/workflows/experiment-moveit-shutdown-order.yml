@@ -3219,23 +3219,42 @@ jobs:
               line for line in lines
               if "[STAUBLI_PIPELINE_MAP] id=ompl " in line
           ]
-          terminate_ptrs = [
-              re.search(r"this=(0x[0-9a-fA-F]+)", line)
-              for line in terminate_entries
+          # Three scenarios terminate the OMPL pipeline (cross-pipeline, one-active-request,
+          # and two-active-token); the reverse-direction scenario deliberately terminates
+          # the in-flight Pilz context and therefore enters terminate() on the Pilz pipeline.
+          ompl_terminate_events = (
+              cross_terminate_events + same_pipeline_terminate_events + multi_terminate_events
+          )
+          ompl_terminate_ptrs = [
+              re.search(r"this=(0x[0-9a-fA-F]+)", line) for _, line in ompl_terminate_events
           ]
+          reverse_terminate_events = [
+              event for event in terminate_events
+              if lines.index(reverse_pilz_context[0]) < event[0] < lines.index(reverse_wrapper[0])
+          ]
+          reverse_terminate_ptrs = [
+              re.search(r"this=(0x[0-9a-fA-F]+)", line) for _, line in reverse_terminate_events
+          ]
+          reverse_pilz_pipeline_ptr = re.search(r"pipeline=(0x[0-9a-fA-F]+)", reverse_pilz_context[0])
           mapped_ompl_ptrs = [
               re.search(r"pipeline=(0x[0-9a-fA-F]+)", line) for line in mapped_ompl
           ]
           if (
               not cross_pipeline_ptr or len(mapped_ompl_ptrs) != 2
-              or any(ptr is None or ptr.group(1) != cross_pipeline_ptr.group(1) for ptr in terminate_ptrs)
               or any(ptr is None or ptr.group(1) != cross_pipeline_ptr.group(1) for ptr in mapped_ompl_ptrs)
+              or len(ompl_terminate_ptrs) != 3
+              or any(ptr is None or ptr.group(1) != cross_pipeline_ptr.group(1) for ptr in ompl_terminate_ptrs)
+              or len(reverse_terminate_events) != 1 or len(reverse_terminate_ptrs) != 1
+              or reverse_terminate_ptrs[0] is None or reverse_pilz_pipeline_ptr is None
+              or reverse_terminate_ptrs[0].group(1) != reverse_pilz_pipeline_ptr.group(1)
               or multi_pipeline_ptrs != {cross_pipeline_ptr.group(1)}
           ):
               raise SystemExit(
-                  "Both terminate entries must target the exact OMPL pipeline used by the "
-                  f"cross-pipeline and same-pipeline probes: held={cross_held}, map={mapped_ompl}, "
-                  f"terminate={terminate_entries}"
+                  "Terminate entries were not associated with their intended pipeline instances: "
+                  f"cross_pipeline={cross_pipeline_ptr.group(1) if cross_pipeline_ptr else None}, "
+                  f"ompl_terminate={ompl_terminate_events}, reverse_pilz_terminate={reverse_terminate_events}, "
+                  f"reverse_pilz_pipeline={reverse_pilz_pipeline_ptr.group(1) if reverse_pilz_pipeline_ptr else None}, "
+                  f"map={mapped_ompl}, multi_pipeline={multi_pipeline_ptrs}"
               )
           cross_released = [line for line in lines if "[STAUBLI_CROSS_PIPELINE] A_OMPL_RELEASED released=1" in line]
           if len(cross_released) != 1:
